@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from PIL import Image
-from utils.utils import free_memory, nms, post_process
+from utils.utils import free_memory, nms, post_process, torch_device
 from utils.parse import p
 
 
@@ -328,7 +328,7 @@ class OWLVITV1Detector(Detector):
         owl_vit_model = OwlViTForObjectDetection.from_pretrained(
             "google/owlvit-base-patch32"
         )
-        self.model = owl_vit_model.eval().to("cuda")
+        self.model = owl_vit_model.eval().to(torch_device)
 
     def detect(self, img_path, split, score_threshold, nms_threshold=0.15):
         # data preprocessing
@@ -341,7 +341,7 @@ class OWLVITV1Detector(Detector):
         image = Image.open(img_path)
         texts = [[f"image of {p.a(obj)}" for obj in target_objects]]
         inputs = self.processor(text=texts, images=image, return_tensors="pt")
-        inputs = inputs.to("cuda")
+        inputs = inputs.to(torch_device)
         with torch.inference_mode():
             outputs = self.model(**inputs)
 
@@ -349,7 +349,7 @@ class OWLVITV1Detector(Detector):
 
         # Target image sizes (height, width) to rescale box predictions [batch_size, 2]
         target_sizes = torch.Tensor([[height, width]])
-        target_sizes = target_sizes.cuda()
+        # target_sizes = target_sizes.cuda()
         # Convert outputs (bounding boxes and class logits) to COCO API
         results = self.processor.post_process_object_detection(
             outputs=outputs, target_sizes=target_sizes, threshold=0
@@ -434,7 +434,7 @@ class OWLVITV2Detector(Detector):
         owl_vit_model = Owlv2ForObjectDetection.from_pretrained(
             "google/owlv2-base-patch16-ensemble"
         )
-        self.model = owl_vit_model.eval().to("cuda")
+        self.model = owl_vit_model.eval().to(torch_device)
 
     def detect(self, img_path, split, score_threshold, nms_threshold):
         # data preprocessing
@@ -448,7 +448,7 @@ class OWLVITV2Detector(Detector):
         texts = [[f"image of {p.a(obj)}" for obj in target_objects]]
 
         inputs = self.processor(text=texts, images=image, return_tensors="pt")
-        inputs = inputs.to("cuda")
+        inputs = inputs.to(torch_device)
         with torch.inference_mode():
             outputs = self.model(**inputs)
 
@@ -456,7 +456,7 @@ class OWLVITV2Detector(Detector):
 
         # Target image sizes (height, width) to rescale box predictions [batch_size, 2]
         target_sizes = torch.Tensor([[height, width]])
-        target_sizes = target_sizes.cuda()
+        # target_sizes = target_sizes.cuda()
         # Convert outputs (bounding boxes and class logits) to COCO API
         results = self.processor.post_process_object_detection(
             outputs=outputs, target_sizes=target_sizes, threshold=0
@@ -536,17 +536,18 @@ if __name__ == "__main__":
         ["raccoon", [None]],
     ]
     det = OWLVITV2Detector()
-    det_results = det.run(prompt, objects, "../demo/dalle3_motor.png")
+    det_results = det.run(prompt, objects, "data/input_dir/dalle3_motor.png")
     llm_suggestions = [
         ["monkey #1", [0.009, 0.006, 0.481, 0.821]],
         ["green motorcycle #1", [0.016, 0.329, 0.506, 0.6]],
         ["blue motorcycle #1", [0.516, 0.329, 0.484, 0.6]],
         ["raccoon #1", [0.46, 0.123, 0.526, 0.62]],
     ]
-    remove_objects, add_objects, move_objects, change_attr_object = det.parse_list(
+    preserve_objects, remove_objects, add_objects, move_objects, change_attr_object = det.parse_list(
         det_results, llm_suggestions
     )
     print(
+        f"- Preserve: {preserve_objects}\n"
         f"- Remove: {remove_objects}\n"
         f"- Add: {add_objects}\n"
         f"- Move: {move_objects}\n"

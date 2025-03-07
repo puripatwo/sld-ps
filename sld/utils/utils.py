@@ -4,7 +4,10 @@ import gc
 
 from PIL import ImageDraw
 
-torch_device = "cuda"
+if torch.cuda.is_available():
+    torch_device = "cuda"
+else:
+    torch_device = "cpu"
 
 
 def free_memory():

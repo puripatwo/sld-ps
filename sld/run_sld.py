@@ -42,6 +42,24 @@ def spot_differences(prompt, det_results, data, config, mode="self_correction"):
         return data["llm_layout_suggestions"]
 
 
+# Operation #1: Addition (The code is in sld/image_generator.py)
+
+
+# Operation #2: Deletion (Preprocessing region mask for removal)
+# def get_remove_region(entry, remove_objects, move_objects, preserve_objs, models, config):
+#     """Generate a region mask for removal given bounding box info."""
+
+#     image_source = np.array(Image.open(entry["output"][-1]))
+#     H, W, _ = image_source.shape
+
+#     # if no remove objects, set zero to the whole mask
+#     if (len(remove_objects) + len(move_objects)) == 0:
+#         remove_region = np.zeros((W // 8, H // 8), dtype=np.int64)
+#         return remove_region
+    
+    
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run SLD")
     parser.add_argument("--json-file", type=str, default="data/data.json", help="Path to data.json")
@@ -72,7 +90,7 @@ if __name__ == "__main__":
         use_fp16=False,
         load_inverse_scheduler=True,
         use_dpm_multistep_scheduler=False,
-        scheduler_cls=diffusers.schedulers.__dict__[diffusion_scheduler] if diffusion_scheduler is not None else False,
+        scheduler_cls=diffusers.schedulers.__dict__[diffusion_scheduler] if diffusion_scheduler is not None else None,
     )
     # sam_model_dict = sam.load_sam()
     # models.model_dict.update(sam_model_dict)
@@ -132,7 +150,7 @@ if __name__ == "__main__":
         # llm_suggestions = spot_differences(prompt, det_results, data[idx], config, mode=args.mode)
         # entry["det_results"] = copy.deepcopy(det_results)
         # entry["llm_suggestions"] = llm_suggestions
-        # print(f"* Detection Restuls: {det_results}")
+        # print(f"* Detection Results: {det_results}")
         # print(f"* LLM Suggestions: {llm_suggestions}")
 
         # # Step 4: Check which objects to preserve, delete, add, reposition, or modify
@@ -151,4 +169,16 @@ if __name__ == "__main__":
         # print(f"* Attribute Modification: {attr_modification_objs}")
 
         # # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
-        
+        # print("-" * 5 + f" Image Manipulation " + "-" * 5)
+
+        # deletion_region = get_remove_region(
+        #     entry, deletion_objs, repositioning_objs, [], models, config
+        # )
+        # repositioning_objs = get_repos_info(
+        #     entry, repositioning_objs, models, config
+        # )
+        # attr_modification_objs = get_attrmod_latent(
+        #     entry, attr_modification_objs, models, config
+        # )
+
+        print()
