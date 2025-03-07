@@ -15,7 +15,7 @@ import diffusers
 import models
 from models import sam
 from models.detector import OWLVITV2Detector
-from utils import parse, utils
+from utils import parse, utils, get_all_latents, run_sam, run_sam_postprocess, resize_image
 
 from llm.llm_parser_template import spot_object_template
 from llm.llm_controller_template import spot_difference_template
@@ -46,18 +46,62 @@ def spot_differences(prompt, det_results, data, config, mode="self_correction"):
 
 
 # Operation #2: Deletion (Preprocessing region mask for removal)
-# def get_remove_region(entry, remove_objects, move_objects, preserve_objs, models, config):
-#     """Generate a region mask for removal given bounding box info."""
+def get_remove_region(entry, remove_objects, move_objects, preserve_objs, models, config):
+    """Generate a region mask for removal given bounding box info."""
 
-#     image_source = np.array(Image.open(entry["output"][-1]))
-#     H, W, _ = image_source.shape
+    image_source = np.array(Image.open(entry["output"][-1]))
+    H, W, _ = image_source.shape
 
-#     # if no remove objects, set zero to the whole mask
-#     if (len(remove_objects) + len(move_objects)) == 0:
-#         remove_region = np.zeros((W // 8, H // 8), dtype=np.int64)
-#         return remove_region
+    # if no remove objects, set zero to the whole mask
+    if (len(remove_objects) + len(move_objects)) == 0:
+        remove_region = np.zeros((W // 8, H // 8), dtype=np.int64)
+        return remove_region
     
-    
+    # Otherwise, run the SAM segmentation to locate target regions
+    remove_items = remove_objects + [x[0] for x in move_objects]
+    remove_mask = np.zeros((H, W, 3), dtype=bool)
+    for obj in remove_items:
+        masks = run_sam(bbox=obj[1], image_source=image_source, models=models)
+        remove_mask = remove_mask | masks
+
+    # Preserve the regions that should not be removed
+    preserve_mask = np.zeros((H, W, 3), dtype=bool)
+    for obj in preserve_objs:
+        masks = run_sam(bbox=obj[1], image_source=image_source, models=models)
+        preserve_mask = preserve_mask | masks
+    # Process the SAM mask by averaging, thresholding, and dilating.
+    preserve_region = run_sam_postprocess(preserve_mask, H, W, config)
+    remove_region = run_sam_postprocess(remove_mask, H, W, config)
+    remove_region = np.logical_and(remove_region, np.logical_not(preserve_region))
+    return remove_region
+
+
+# Operation #3: Repositioning (Preprocessing latent)
+def get_repos_info(entry, move_objects, models, config):
+    """
+    Updates a list of objects to be moved / reshaped, including resizing images and generating masks.
+    * Important: Perform image reshaping at the image-level rather than the latent-level.
+    * Warning: For simplicity, the object is not positioned to the center of the new region...
+    """
+
+    # if no remove objects, set zero to the whole mask
+    if not move_objects:
+        return move_objects
+    image_source = np.array(Image.open(entry["output"][-1]))
+    H, W, _ = image_source.shape
+    inv_seed = int(config.get("SLD", "inv_seed"))
+
+    new_move_objects = []
+    for item in move_objects:
+        new_img, obj = resize_image(image_source, item[0][1], item[1][1])
+        masks = run_sam(obj, new_img, models)
+        old_object_region = run_sam_postprocess(masks, H, W, config).astype(np.bool_)
+        all_latents, _ = get_all_latents(new_img, models, inv_seed)
+        new_move_objects.append(
+            [item[0][0], obj, item[1][1], old_object_region, all_latents]
+        )
+
+    return new_move_objects
 
 
 if __name__ == "__main__":
@@ -94,7 +138,7 @@ if __name__ == "__main__":
     )
     # sam_model_dict = sam.load_sam()
     # models.model_dict.update(sam_model_dict)
-    # det = OWLVITV2Detector()
+    det = OWLVITV2Detector()
 
     for idx in range(len(data)):
         # Reset random seeds
@@ -130,55 +174,55 @@ if __name__ == "__main__":
         print(f"* Background: {entry['bg_prompt']}")
         print(f"* Negation: {entry['neg_prompt']}")
 
-        # # Step 2: Run open vocabulary detector
-        # print("-" * 5 + f" Running Detector " + "-" * 5)
-        # default_attr_threshold = float(config.get("SLD", "attr_detection_threshold")) 
-        # default_prim_threshold = float(config.get("SLD", "prim_detection_threshold"))
-        # default_nms_threshold = float(config.get("SLD", "nms_threshold"))
+        # Step 2: Run open vocabulary detector
+        print("-" * 5 + f" Running Detector " + "-" * 5)
+        default_attr_threshold = float(config.get("SLD", "attr_detection_threshold")) 
+        default_prim_threshold = float(config.get("SLD", "prim_detection_threshold"))
+        default_nms_threshold = float(config.get("SLD", "nms_threshold"))
 
-        # attr_threshold = float(config.get(entry["generator"], "attr_detection_threshold", fallback=default_attr_threshold))
-        # prim_threshold = float(config.get(entry["generator"], "prim_detection_threshold", fallback=default_prim_threshold))
-        # nms_threshold = float(config.get(entry["generator"], "nms_threshold", fallback=default_nms_threshold))
+        attr_threshold = float(config.get(entry["generator"], "attr_detection_threshold", fallback=default_attr_threshold))
+        prim_threshold = float(config.get(entry["generator"], "prim_detection_threshold", fallback=default_prim_threshold))
+        nms_threshold = float(config.get(entry["generator"], "nms_threshold", fallback=default_nms_threshold))
 
-        # det_results = det.run(prompt, entry["objects"], entry["output"][-1],
-        #                       attr_detection_threshold=attr_threshold, 
-        #                       prim_detection_threshold=prim_threshold, 
-        #                       nms_threshold=nms_threshold)
+        det_results = det.run(prompt, entry["objects"], entry["output"][-1],
+                              attr_detection_threshold=attr_threshold, 
+                              prim_detection_threshold=prim_threshold, 
+                              nms_threshold=nms_threshold)
         
-        # # Step 3: Spot difference between detected results and initial prompts
-        # print("-" * 5 + f" Getting Modification Suggestions " + "-" * 5)
-        # llm_suggestions = spot_differences(prompt, det_results, data[idx], config, mode=args.mode)
-        # entry["det_results"] = copy.deepcopy(det_results)
-        # entry["llm_suggestions"] = llm_suggestions
-        # print(f"* Detection Results: {det_results}")
-        # print(f"* LLM Suggestions: {llm_suggestions}")
+        # Step 3: Spot difference between detected results and initial prompts
+        print("-" * 5 + f" Getting Modification Suggestions " + "-" * 5)
+        llm_suggestions = spot_differences(prompt, det_results, data[idx], config, mode=args.mode)
+        entry["det_results"] = copy.deepcopy(det_results)
+        entry["llm_suggestions"] = llm_suggestions
+        print(f"* Detection Results: {det_results}")
+        print(f"* LLM Suggestions: {llm_suggestions}")
 
-        # # Step 4: Check which objects to preserve, delete, add, reposition, or modify
-        # print("-" * 5 + f" Editing Operations " + "-" * 5)
-        # (
-        #     preserve_objs,
-        #     deletion_objs,
-        #     addition_objs,
-        #     repositioning_objs,
-        #     attr_modification_objs,
-        # ) = det.parse_list(det_results, llm_suggestions)
-        # print(f"* Preservation: {preserve_objs}")
-        # print(f"* Addition: {addition_objs}")
-        # print(f"* Deletion: {deletion_objs}")
-        # print(f"* Repositioning: {repositioning_objs}")
-        # print(f"* Attribute Modification: {attr_modification_objs}")
+        # Step 4: Check which objects to preserve, delete, add, reposition, or modify
+        print("-" * 5 + f" Editing Operations " + "-" * 5)
+        (
+            preserve_objs,
+            deletion_objs,
+            addition_objs,
+            repositioning_objs,
+            attr_modification_objs,
+        ) = det.parse_list(det_results, llm_suggestions)
+        print(f"* Preservation: {preserve_objs}")
+        print(f"* Addition: {addition_objs}")
+        print(f"* Deletion: {deletion_objs}")
+        print(f"* Repositioning: {repositioning_objs}")
+        print(f"* Attribute Modification: {attr_modification_objs}")
 
-        # # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
-        # print("-" * 5 + f" Image Manipulation " + "-" * 5)
+        # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
+        print("-" * 5 + f" Image Manipulation " + "-" * 5)
 
-        # deletion_region = get_remove_region(
-        #     entry, deletion_objs, repositioning_objs, [], models, config
-        # )
-        # repositioning_objs = get_repos_info(
-        #     entry, repositioning_objs, models, config
-        # )
-        # attr_modification_objs = get_attrmod_latent(
-        #     entry, attr_modification_objs, models, config
-        # )
+        deletion_region = get_remove_region(
+            entry, deletion_objs, repositioning_objs, [], models, config
+        )
+        repositioning_objs = get_repos_info(
+            entry, repositioning_objs, models, config
+        )
+        attr_modification_objs = get_attrmod_latent(
+            entry, attr_modification_objs, models, config
+        )
 
         print()

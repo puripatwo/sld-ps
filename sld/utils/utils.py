@@ -1,8 +1,11 @@
 import numpy as np
 import torch
 import gc
+import cv2
 
 from PIL import ImageDraw
+from models import sam
+from models import pipelines
 
 if torch.cuda.is_available():
     torch_device = "cuda"
@@ -15,6 +18,7 @@ def free_memory():
     torch.cuda.empty_cache()
 
 
+# ----- detector.py ------
 def nms(
     bounding_boxes,
     confidence_score,
@@ -105,3 +109,116 @@ def post_process(box):
         item = min(1.0, max(0.0, item))
         new_box.append(round(item, 3))
     return new_box
+
+
+# ----- sam.py ------
+def run_sam(bbox, image_source, models):
+    H, W, _ = image_source.shape
+    box_xyxy = torch.Tensor(
+        [
+            bbox[0],
+            bbox[1],
+            bbox[2] + bbox[0],
+            bbox[3] + bbox[1]
+        ]
+    ) * torch.Tensor([W, H, W, H])
+    box_xyxy = box_xyxy.unsqueeze(0).unsqueeze(0)
+    masks, _ = sam.sam(
+        models.model_dict,
+        image_source,
+        input_boxes=box_xyxy,
+        target_mask_shape=(H, W),
+    )
+    masks = masks[0][0].transpose(1, 2, 0).astype(bool)
+    return masks
+
+def run_sam_postprocess(remove_mask, H, W, config):
+    remove_mask = np.mean(remove_mask, axis=2)
+    remove_mask[remove_mask > 0.05] = 1.0
+    k_size = int(config.get("SLD", "SAM_refine_dilate"))
+    kernel = np.ones((k_size, k_size), np.uint8)
+    dilated_mask = cv2.dilate(
+        (remove_mask * 255).astype(np.uint8), kernel, iterations=1
+    )
+    # Resize the mask from the image size to the latent size
+    remove_region = cv2.resize(
+        dilated_mask.astype(np.int64),
+        dsize=(W // 8, H // 8),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    return remove_region
+
+
+DEFAULT_SO_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate, two, many, group, occlusion, occluded, side, border, collate"
+DEFAULT_OVERALL_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate"
+
+
+def get_all_latents(img_np, models, inv_seed=1):
+    generator = torch.cuda.manual_seed(inv_seed)
+    cln_latents = pipelines.encode(models.model_dict, img_np, generator)
+    # Magic prompt
+    # Have tried using the parsed bg prompt from the LLM, but it doesn't work well
+    prompt = "A realistic photo of a scene"
+    input_embeddings = models.encode_prompts(
+        prompts=[prompt],
+        tokenizer=models.model_dict.tokenizer,
+        text_encoder=models.model_dict.text_encoder,
+        negative_prompt=DEFAULT_OVERALL_NEGATIVE_PROMPT,
+        one_uncond_input_only=False,
+    )
+    # Get all hidden latents
+    all_latents = pipelines.invert(
+        models.model_dict,
+        cln_latents,
+        input_embeddings,
+        num_inference_steps=50,
+        guidance_scale=2.5,
+    )
+    return all_latents, input_embeddings
+
+
+def calculate_scale_ratio(region_a_param, region_b_param):
+    _, _, a_width, a_height = region_a_param
+    _, _, b_width, b_height = region_b_param
+    scale_ratio_width = b_width / a_width
+    scale_ratio_height = b_height / a_height
+    return min(scale_ratio_width, scale_ratio_height)
+
+
+def resize_image(image, region_a_param, region_b_param):
+    """
+    Resizes the image based on the scaling ratio between two regions and performs cropping or padding.
+    """
+    old_h, old_w, _ = image.shape
+    scale_ratio = calculate_scale_ratio(region_a_param, region_b_param)
+
+    new_size = (int(old_w * scale_ratio), int(old_h * scale_ratio))
+
+    resized_image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+    new_h, new_w, _ = resized_image.shape
+    region_a_param_real = [
+        int(region_a_param[0] * new_h),
+        int(region_a_param[1] * new_w),
+        int(region_a_param[2] * new_h),
+        int(region_a_param[3] * new_w),
+    ]
+    if scale_ratio >= 1:  # Cropping
+        new_xmin = min(region_a_param_real[0], int(new_h - old_h))
+        new_ymin = min(region_a_param_real[1], int(new_w - old_w))
+
+        new_img = resized_image[
+            new_ymin : new_ymin + old_w, new_xmin : new_xmin + old_h
+        ]
+
+        new_param = [
+            (region_a_param_real[0] - new_xmin) / old_h,
+            (region_a_param_real[1] - new_ymin) / old_w,
+            region_a_param[2] * scale_ratio,
+            region_a_param[3] * scale_ratio,
+        ]
+    else:  # Padding
+        new_img = np.ones((old_h, old_w, 3), dtype=np.uint8) * 255
+        new_img[:new_h, :new_w] = resized_image
+        new_param = [region_a_param[i] * scale_ratio for i in range(4)]
+
+    return new_img, new_param
