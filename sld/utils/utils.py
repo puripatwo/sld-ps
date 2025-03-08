@@ -2,15 +2,17 @@ import numpy as np
 import torch
 import gc
 import cv2
-
 from PIL import ImageDraw
-from models import sam
-from models import pipelines
 
 if torch.cuda.is_available():
     torch_device = "cuda"
 else:
     torch_device = "cpu"
+
+# if torch.backends.mps.is_available():
+#     torch_device = "mps"
+# else:
+#     torch_device = "cpu"
 
 
 def free_memory():
@@ -18,7 +20,7 @@ def free_memory():
     torch.cuda.empty_cache()
 
 
-# ----- detector.py ------
+# detector.py
 def nms(
     bounding_boxes,
     confidence_score,
@@ -103,6 +105,7 @@ def nms(
     return picked_boxes, picked_score, picked_labels
 
 
+# detector.py
 def post_process(box):
     new_box = []
     for item in box:
@@ -111,72 +114,7 @@ def post_process(box):
     return new_box
 
 
-# ----- sam.py ------
-def run_sam(bbox, image_source, models):
-    H, W, _ = image_source.shape
-    box_xyxy = torch.Tensor(
-        [
-            bbox[0],
-            bbox[1],
-            bbox[2] + bbox[0],
-            bbox[3] + bbox[1]
-        ]
-    ) * torch.Tensor([W, H, W, H])
-    box_xyxy = box_xyxy.unsqueeze(0).unsqueeze(0)
-    masks, _ = sam.sam(
-        models.model_dict,
-        image_source,
-        input_boxes=box_xyxy,
-        target_mask_shape=(H, W),
-    )
-    masks = masks[0][0].transpose(1, 2, 0).astype(bool)
-    return masks
-
-def run_sam_postprocess(remove_mask, H, W, config):
-    remove_mask = np.mean(remove_mask, axis=2)
-    remove_mask[remove_mask > 0.05] = 1.0
-    k_size = int(config.get("SLD", "SAM_refine_dilate"))
-    kernel = np.ones((k_size, k_size), np.uint8)
-    dilated_mask = cv2.dilate(
-        (remove_mask * 255).astype(np.uint8), kernel, iterations=1
-    )
-    # Resize the mask from the image size to the latent size
-    remove_region = cv2.resize(
-        dilated_mask.astype(np.int64),
-        dsize=(W // 8, H // 8),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    return remove_region
-
-
-DEFAULT_SO_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate, two, many, group, occlusion, occluded, side, border, collate"
-DEFAULT_OVERALL_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate"
-
-
-def get_all_latents(img_np, models, inv_seed=1):
-    generator = torch.cuda.manual_seed(inv_seed)
-    cln_latents = pipelines.encode(models.model_dict, img_np, generator)
-    # Magic prompt
-    # Have tried using the parsed bg prompt from the LLM, but it doesn't work well
-    prompt = "A realistic photo of a scene"
-    input_embeddings = models.encode_prompts(
-        prompts=[prompt],
-        tokenizer=models.model_dict.tokenizer,
-        text_encoder=models.model_dict.text_encoder,
-        negative_prompt=DEFAULT_OVERALL_NEGATIVE_PROMPT,
-        one_uncond_input_only=False,
-    )
-    # Get all hidden latents
-    all_latents = pipelines.invert(
-        models.model_dict,
-        cln_latents,
-        input_embeddings,
-        num_inference_steps=50,
-        guidance_scale=2.5,
-    )
-    return all_latents, input_embeddings
-
-
+# run_sld.py
 def calculate_scale_ratio(region_a_param, region_b_param):
     _, _, a_width, a_height = region_a_param
     _, _, b_width, b_height = region_b_param
@@ -185,6 +123,7 @@ def calculate_scale_ratio(region_a_param, region_b_param):
     return min(scale_ratio_width, scale_ratio_height)
 
 
+# run_sld.py
 def resize_image(image, region_a_param, region_b_param):
     """
     Resizes the image based on the scaling ratio between two regions and performs cropping or padding.
@@ -222,3 +161,40 @@ def resize_image(image, region_a_param, region_b_param):
         new_param = [region_a_param[i] * scale_ratio for i in range(4)]
 
     return new_img, new_param
+
+
+# image_generator.py
+def get_centered_box(
+    box,
+    horizontal_center_only=True,
+    vertical_placement="centered",
+    vertical_center=0.5,
+    floor_padding=None,
+):
+    x_min, y_min, x_max, y_max = box
+    w = x_max - x_min
+
+    x_min_new = 0.5 - w / 2
+    x_max_new = 0.5 + w / 2
+
+    if horizontal_center_only:
+        return [x_min_new, y_min, x_max_new, y_max]
+
+    h = y_max - y_min
+
+    if vertical_placement == "centered":
+        assert (
+            floor_padding is None
+        ), "Set vertical_placement to floor_padding to use floor padding"
+
+        y_min_new = vertical_center - h / 2
+        y_max_new = vertical_center + h / 2
+    elif vertical_placement == "floor_padding":
+        # Ignores `vertical_center`
+
+        y_max_new = 1 - floor_padding
+        y_min_new = y_max_new - h
+    else:
+        raise ValueError(f"Unknown vertical placement: {vertical_placement}")
+
+    return [x_min_new, y_min_new, x_max_new, y_max_new]

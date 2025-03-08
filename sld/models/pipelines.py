@@ -11,7 +11,15 @@ from utils import torch_device
 from .attention import GatedSelfAttentionDense
 from .models import process_input_embeddings
 
+DEFAULT_GUIDANCE_ATTN_KEYS = [
+    ("mid", 0, 0, 0),
+    ("up", 1, 0, 0),
+    ("up", 1, 1, 0),
+    ("up", 1, 2, 0),
+]
 
+
+# ----------------- LATENT BACKWARD GUIDANCE -----------------
 @torch.no_grad()
 def encode(model_dict, image, generator):
     vae, dtype = model_dict.vae, model_dict.dtype
@@ -128,3 +136,34 @@ def invert(model_dict, latents, input_embeddings, num_inference_steps, guidance_
     inverted_latents = torch.stack(list(reversed(inverted_latents)), dim=0)
 
     return inverted_latents
+
+
+DEFAULT_SO_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate, two, many, group, occlusion, occluded, side, border, collate"
+DEFAULT_OVERALL_NEGATIVE_PROMPT = "artifacts, blurry, smooth texture, bad quality, distortions, unrealistic, distorted image, bad proportions, duplicate"
+
+
+def get_all_latents(img_np, models, inv_seed=1):
+    generator = torch.cuda.manual_seed(inv_seed)
+    cln_latents = encode(models.model_dict, img_np, generator)
+    # Magic prompt
+    # Have tried using the parsed bg prompt from the LLM, but it doesn't work well
+    prompt = "A realistic photo of a scene"
+    input_embeddings = models.encode_prompts(
+        prompts=[prompt],
+        tokenizer=models.model_dict.tokenizer,
+        text_encoder=models.model_dict.text_encoder,
+        negative_prompt=DEFAULT_OVERALL_NEGATIVE_PROMPT,
+        one_uncond_input_only=False,
+    )
+    # Get all hidden latents
+    all_latents = invert(
+        models.model_dict,
+        cln_latents,
+        input_embeddings,
+        num_inference_steps=50,
+        guidance_scale=2.5,
+    )
+    return all_latents, input_embeddings
+
+
+# ----------------- GLIGEN -----------------

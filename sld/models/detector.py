@@ -1,7 +1,7 @@
 import numpy as np
 import torch
-
 from PIL import Image
+
 from utils.utils import free_memory, nms, post_process, torch_device
 from utils.parse import p
 

@@ -8,14 +8,16 @@ import shutil
 import random
 import numpy as np
 from PIL import Image
-
 import torch
 import diffusers
 
 import models
 from models import sam
+from models.sam import run_sam, run_sam_postprocess
+from models.pipelines import get_all_latents
 from models.detector import OWLVITV2Detector
-from utils import parse, utils, get_all_latents, run_sam, run_sam_postprocess, resize_image
+
+from utils import parse, utils, resize_image
 
 from llm.llm_parser_template import spot_object_template
 from llm.llm_controller_template import spot_difference_template
@@ -104,6 +106,87 @@ def get_repos_info(entry, move_objects, models, config):
     return new_move_objects
 
 
+# Operation #4: Attribute Modification (Preprocessing latent)
+def get_attrmod_latent(entry, change_attr_objects, models, config):
+    if len(change_attr_objects) == 0:
+        return []
+    
+    from diffusers import StableDiffusionDiffEditPipeline
+    from diffusers import DDIMScheduler, DDIMInverseScheduler
+
+    img = Image.open(entry["output"][-1])
+    image_source = np.array(img)
+    H, W, _ = image_source.shape
+    inv_seed = int(config.get("SLD", "inv_seed"))
+
+    # Initialize the Stable Diffusion pipeline
+    pipe = StableDiffusionDiffEditPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-base", torch_dtype=torch.float16).to("cuda")
+    pipe.inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+    pipe.enable_model_cpu_offload()
+
+    new_change_objects = []
+    for obj in change_attr_objects:
+        # Run diffedit
+        old_object_region = run_sam_postprocess(run_sam(obj[1], image_source, models), H, W, config)
+        old_object_region = old_object_region.astype(np.bool_)[np.newaxis, ...]
+
+        new_object = obj[0].split(" #")[0]
+        base_object = new_object.split(" ")[-1]
+        mask_prompt = f"a {base_object}"
+        new_prompt = f"a {new_object}"
+
+        image_latents = pipe.invert(
+            image=img,
+            prompt=mask_prompt,
+            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+        ).latents
+        image = pipe(
+            prompt=new_prompt,
+            mask_image=old_object_region,
+            image_latents=image_latents,
+            guidance_scale=float(config.get("SLD", "diffedit_guidance_scale")),
+            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+            negative_prompt="",
+        ).images[0]
+
+        all_latents, _ = get_all_latents(np.array(image), models, inv_seed)
+        new_change_objects.append(
+            [
+                old_object_region[0],
+                all_latents,
+            ]
+        )
+    return new_change_objects
+
+
+def correction(entry, add_objects, move_objects, remove_region, change_attr_objects, models, config):
+    spec = {
+        "add_objects": add_objects,
+        "move_objects": move_objects,
+        "prompt": entry["instructions"],
+        "remove_region": remove_region,
+        "change_objects": change_attr_objects,
+        "all_objects": entry["llm_suggestion"],
+        "bg_prompt": entry["bg_prompt"],
+        "extra_neg_prompt": entry["neg_prompt"],
+    }
+    image_source = np.array(Image.open(entry["output"][-1]))
+
+    # Run the correction pipeline
+    all_latents, _ = get_all_latents(image_source, models, int(config.get("SLD", "inv_seed")))
+    ret_dict = image_generator.run(
+        spec,
+        fg_seed_start=int(config.get("SLD", "fg_seed")),
+        bg_seed=int(config.get("SLD", "bg_seed")),
+        bg_all_latents=all_latents,
+        frozen_step_ratio=float(config.get("SLD", "frozen_step_ratio")),
+    )
+
+    return ret_dict
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run SLD")
     parser.add_argument("--json-file", type=str, default="data/data.json", help="Path to data.json")
@@ -136,8 +219,8 @@ if __name__ == "__main__":
         use_dpm_multistep_scheduler=False,
         scheduler_cls=diffusers.schedulers.__dict__[diffusion_scheduler] if diffusion_scheduler is not None else None,
     )
-    # sam_model_dict = sam.load_sam()
-    # models.model_dict.update(sam_model_dict)
+    sam_model_dict = sam.load_sam()
+    models.model_dict.update(sam_model_dict)
     det = OWLVITV2Detector()
 
     for idx in range(len(data)):
@@ -212,17 +295,40 @@ if __name__ == "__main__":
         print(f"* Repositioning: {repositioning_objs}")
         print(f"* Attribute Modification: {attr_modification_objs}")
 
+        # Visualize the detection results
+        parse.show_boxes(
+            gen_boxes=entry["det_results"],
+            additional_boxes=entry["llm_suggestion"],
+            img=np.array(Image.open(entry["output"][-1])).astype(np.uint8),
+            fname=os.path.join(dirname, "det_result_obj.png"),
+        )
+
+        # Check if there are any operations to perform
+        total_ops = len(deletion_objs) + len(addition_objs) + len(repositioning_objs) + len(attr_modification_objs)
+        if total_ops == 0:
+            print("-" * 5 + f" Results " + "-" * 5)
+            output_fname = os.path.join(dirname, f"final_image.png") # output_fname = data/output_dir/{output_dir}/final_image.png
+            shutil.copy(entry["output"][-1], output_fname)
+            print(f"No operations needed. The final image is saved at {output_fname}")
+            continue
+
         # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
         print("-" * 5 + f" Image Manipulation " + "-" * 5)
 
         deletion_region = get_remove_region(
             entry, deletion_objs, repositioning_objs, [], models, config
         )
+        print(f"* Deletion: {deletion_region}")
         repositioning_objs = get_repos_info(
             entry, repositioning_objs, models, config
         )
+        print(f"* Repositioning: {repositioning_objs}")
         attr_modification_objs = get_attrmod_latent(
             entry, attr_modification_objs, models, config
+        )
+        print(f"* Attribute Modification: {attr_modification_objs}")
+        ret_dict = correction(
+            entry, addition_objs, repositioning_objs, deletion_region, attr_modification_objs, models, config
         )
 
         print()
