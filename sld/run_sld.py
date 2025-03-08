@@ -161,30 +161,30 @@ def get_attrmod_latent(entry, change_attr_objects, models, config):
     return new_change_objects
 
 
-def correction(entry, add_objects, move_objects, remove_region, change_attr_objects, models, config):
-    spec = {
-        "add_objects": add_objects,
-        "move_objects": move_objects,
-        "prompt": entry["instructions"],
-        "remove_region": remove_region,
-        "change_objects": change_attr_objects,
-        "all_objects": entry["llm_suggestion"],
-        "bg_prompt": entry["bg_prompt"],
-        "extra_neg_prompt": entry["neg_prompt"],
-    }
-    image_source = np.array(Image.open(entry["output"][-1]))
+# def correction(entry, add_objects, move_objects, remove_region, change_attr_objects, models, config):
+#     spec = {
+#         "add_objects": add_objects,
+#         "move_objects": move_objects,
+#         "prompt": entry["instructions"],
+#         "remove_region": remove_region,
+#         "change_objects": change_attr_objects,
+#         "all_objects": entry["llm_suggestion"],
+#         "bg_prompt": entry["bg_prompt"],
+#         "extra_neg_prompt": entry["neg_prompt"],
+#     }
+#     image_source = np.array(Image.open(entry["output"][-1]))
 
-    # Run the correction pipeline
-    all_latents, _ = get_all_latents(image_source, models, int(config.get("SLD", "inv_seed")))
-    ret_dict = image_generator.run(
-        spec,
-        fg_seed_start=int(config.get("SLD", "fg_seed")),
-        bg_seed=int(config.get("SLD", "bg_seed")),
-        bg_all_latents=all_latents,
-        frozen_step_ratio=float(config.get("SLD", "frozen_step_ratio")),
-    )
+#     # Run the correction pipeline
+#     all_latents, _ = get_all_latents(image_source, models, int(config.get("SLD", "inv_seed")))
+#     ret_dict = image_generator.run(
+#         spec,
+#         fg_seed_start=int(config.get("SLD", "fg_seed")),
+#         bg_seed=int(config.get("SLD", "bg_seed")),
+#         bg_all_latents=all_latents,
+#         frozen_step_ratio=float(config.get("SLD", "frozen_step_ratio")),
+#     )
 
-    return ret_dict
+#     return ret_dict
 
 
 if __name__ == "__main__":
@@ -276,7 +276,7 @@ if __name__ == "__main__":
         print("-" * 5 + f" Getting Modification Suggestions " + "-" * 5)
         llm_suggestions = spot_differences(prompt, det_results, data[idx], config, mode=args.mode)
         entry["det_results"] = copy.deepcopy(det_results)
-        entry["llm_suggestions"] = llm_suggestions
+        entry["llm_suggestions"] = copy.deepcopy(llm_suggestions)
         print(f"* Detection Results: {det_results}")
         print(f"* LLM Suggestions: {llm_suggestions}")
 
@@ -298,7 +298,7 @@ if __name__ == "__main__":
         # Visualize the detection results
         parse.show_boxes(
             gen_boxes=entry["det_results"],
-            additional_boxes=entry["llm_suggestion"],
+            additional_boxes=entry["llm_suggestions"],
             img=np.array(Image.open(entry["output"][-1])).astype(np.uint8),
             fname=os.path.join(dirname, "det_result_obj.png"),
         )
@@ -315,20 +315,20 @@ if __name__ == "__main__":
         # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
         print("-" * 5 + f" Image Manipulation " + "-" * 5)
 
-        deletion_region = get_remove_region(
-            entry, deletion_objs, repositioning_objs, [], models, config
-        )
-        print(f"* Deletion: {deletion_region}")
-        repositioning_objs = get_repos_info(
-            entry, repositioning_objs, models, config
-        )
-        print(f"* Repositioning: {repositioning_objs}")
-        attr_modification_objs = get_attrmod_latent(
-            entry, attr_modification_objs, models, config
-        )
-        print(f"* Attribute Modification: {attr_modification_objs}")
-        ret_dict = correction(
-            entry, addition_objs, repositioning_objs, deletion_region, attr_modification_objs, models, config
-        )
+        # deletion_region = get_remove_region(
+        #     entry, deletion_objs, repositioning_objs, [], models, config
+        # )
+        # print(f"* Deletion: {deletion_region}")
+        # repositioning_objs = get_repos_info(
+        #     entry, repositioning_objs, models, config
+        # )
+        # print(f"* Repositioning: {repositioning_objs}")
+        # attr_modification_objs = get_attrmod_latent(
+        #     entry, attr_modification_objs, models, config
+        # )
+        # print(f"* Attribute Modification: {attr_modification_objs}")
+        # ret_dict = correction(
+        #     entry, addition_objs, repositioning_objs, deletion_region, attr_modification_objs, models, config
+        # )
 
         print()
