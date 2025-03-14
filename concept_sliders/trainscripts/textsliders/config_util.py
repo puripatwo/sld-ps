@@ -61,3 +61,14 @@ class RootConfig(BaseModel):
     save: Optional[SaveConfig]
     logging: Optional[LoggingConfig]
     other: Optional[OtherConfig]
+
+
+def parse_precision(precision: str) -> torch.dtype:
+    if precision == "fp32" or precision == "float32":
+        return torch.float32
+    elif precision == "fp16" or precision == "float16":
+        return torch.float16
+    elif precision == "bf16" or precision == "bfloat16":
+        return torch.bfloat16
+
+    raise ValueError(f"Invalid precision type: {precision}")
