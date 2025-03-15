@@ -72,3 +72,24 @@ def parse_precision(precision: str) -> torch.dtype:
         return torch.bfloat16
 
     raise ValueError(f"Invalid precision type: {precision}")
+
+
+def load_config_from_yaml(config_path: str) -> RootConfig:
+    with open(config_path, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+
+    root = RootConfig(**config)
+
+    if root.train is None:
+        root.train = TrainConfig()
+
+    if root.save is None:
+        root.save = SaveConfig()
+
+    if root.logging is None:
+        root.logging = LoggingConfig()
+
+    if root.other is None:
+        root.other = OtherConfig()
+
+    return root

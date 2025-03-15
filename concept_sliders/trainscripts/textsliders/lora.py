@@ -185,3 +185,15 @@ class LoRANetwork(nn.Module):
                             names.append(lora_name)
 
         return loras
+    
+    def prepare_optimizer_params(self):
+        all_params = []
+
+        if self.unet_loras:
+            params = []
+            [params.extend(lora.parameters()) for lora in self.unet_loras]
+            param_data = {"params": params}
+            all_params.append(param_data)
+
+        return all_params
+    

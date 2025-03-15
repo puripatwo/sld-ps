@@ -22,6 +22,8 @@ DIFFUSERS_CACHE_DIR = None  # if you want to change the cache dir, change this
 TOKENIZER_V1_MODEL_NAME = "CompVis/stable-diffusion-v1-4"
 TOKENIZER_V2_MODEL_NAME = "stabilityai/stable-diffusion-2-1"
 
+SDXL_TEXT_ENCODER_TYPE = Union[CLIPTextModel, CLIPTextModelWithProjection]
+
 
 def load_checkpoint_model(
     checkpoint_path: str,
@@ -97,32 +99,6 @@ def load_diffusers_model(
     return tokenizer, text_encoder, unet
 
 
-def load_models(
-    pretrained_model_name_or_path: str,
-    scheduler_name: AVAILABLE_SCHEDULERS,
-    v2: bool = False,
-    v_pred: bool = False,
-    weight_dtype: torch.dtype = torch.float32,
-) -> tuple[CLIPTokenizer, CLIPTextModel, UNet2DConditionModel, SchedulerMixin,]:
-    
-    if pretrained_model_name_or_path.endswith(".ckpt") or pretrained_model_name_or_path.endswith(".safetensors"):
-        tokenizer, text_encoder, unet = load_checkpoint_model(
-            pretrained_model_name_or_path, v2=v2, weight_dtype=weight_dtype
-        )
-    else:
-        tokenizer, text_encoder, unet = load_diffusers_model(
-            pretrained_model_name_or_path, v2=v2, weight_dtype=weight_dtype
-        )
-
-
-    scheduler = create_noise_scheduler(
-        scheduler_name,
-        prediction_type="v_prediction" if v_pred else "epsilon",
-    )
-
-    return tokenizer, text_encoder, unet, scheduler
-
-
 def create_noise_scheduler(
     scheduler_name: AVAILABLE_SCHEDULERS = "ddpm",
     prediction_type: Literal["epsilon", "v_prediction"] = "epsilon",
@@ -171,3 +147,29 @@ def create_noise_scheduler(
         raise ValueError(f"Unknown scheduler name: {name}")
 
     return scheduler
+
+
+def load_models(
+    pretrained_model_name_or_path: str,
+    scheduler_name: AVAILABLE_SCHEDULERS,
+    v2: bool = False,
+    v_pred: bool = False,
+    weight_dtype: torch.dtype = torch.float32,
+) -> tuple[CLIPTokenizer, CLIPTextModel, UNet2DConditionModel, SchedulerMixin,]:
+    
+    if pretrained_model_name_or_path.endswith(".ckpt") or pretrained_model_name_or_path.endswith(".safetensors"):
+        tokenizer, text_encoder, unet = load_checkpoint_model(
+            pretrained_model_name_or_path, v2=v2, weight_dtype=weight_dtype
+        )
+    else:
+        tokenizer, text_encoder, unet = load_diffusers_model(
+            pretrained_model_name_or_path, v2=v2, weight_dtype=weight_dtype
+        )
+
+
+    scheduler = create_noise_scheduler(
+        scheduler_name,
+        prediction_type="v_prediction" if v_pred else "epsilon",
+    )
+
+    return tokenizer, text_encoder, unet, scheduler
