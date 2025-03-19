@@ -166,7 +166,6 @@ def load_models(
             pretrained_model_name_or_path, v2=v2, weight_dtype=weight_dtype
         )
 
-
     scheduler = create_noise_scheduler(
         scheduler_name,
         prediction_type="v_prediction" if v_pred else "epsilon",

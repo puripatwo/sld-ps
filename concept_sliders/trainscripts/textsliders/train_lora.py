@@ -55,23 +55,23 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     )
 
     text_encoder.to(device, dtype=weight_dtype)
-    text_encoder.eval()
+    text_encoder.eval() # Freezes Text Encoder
 
     unet.to(device, dtype=weight_dtype)
     unet.enable_xformers_memory_efficient_attention()
     unet.requires_grad_(False)
-    unet.eval()
+    unet.eval() # Freezes UNet
 
     # 2. Set up LoRA.
     network = LoRANetwork(
         unet,
-        rank=config.network.rank,
+        rank=config.network.rank, # Controls LoRa's bottleneck size
         multiplier=1.0,
-        alpha=config.network.alpha,
+        alpha=config.network.alpha, # Scales the impact of LoRA
         train_method=config.network.training_method,
     ).to(device, dtype=weight_dtype)
 
-    # 3. Optimizer and scheduler setup.
+    # 3. Optimizer setup.
     optimizer_module = train_util.get_optimizer(config.train.optimizer)
     optimizer_kwargs = {}
     if config.train.optimizer_args is not None and len(config.train.optimizer_args) > 0:
@@ -80,14 +80,15 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
             value = ast.literal_eval(value)
             optimizer_kwargs[key] = value
     optimizer = optimizer_module(network.prepare_optimizer_params(), lr=config.train.lr, **optimizer_kwargs)
+    criteria = torch.nn.MSELoss()
 
+    # 4. Scheduler setup.
     lr_scheduler = train_util.get_lr_scheduler(
         config.train.lr_scheduler,
         optimizer,
         max_iterations=config.train.iterations,
         lr_min=config.train.lr / 100,
     )
-    criteria = torch.nn.MSELoss()
     
     print("Prompts: ")
     for settings in prompts:
@@ -99,7 +100,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     cache = PromptEmbedsCache()
     prompt_pairs: list[PromptEmbedsPair] = []
 
-    # 4. Prompt encoding and caching.
+    # 5. Prompt encoding and caching.
     with torch.no_grad():
         for settings in prompts:
             print(settings)
@@ -138,6 +139,61 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     del tokenizer
     del text_encoder
     flush()
+
+    # 6. Training Loop
+    pbar = tqdm(range(config.train.iterations))
+    for i in pbar:
+        with torch.no_grad():
+            noise_scheduler.set_timesteps(
+                config.train.max_denoising_steps, device=device
+            )
+        optimizer.zero_grad()
+
+        # 6.1. Sampling a training example.
+        prompt_pair: PromptEmbedsPair = prompt_pairs[
+            torch.randint(0, len(prompt_pairs), (1,)).item()
+        ]
+        
+        timesteps_to = torch.randint(1, config.train.max_denoising_steps, (1,)).item()
+
+        # 6.2. Set up dynamic resolution.
+        height, width = (prompt_pair.resolution, prompt_pair.resolution)
+        if prompt_pair.dynamic_resolution:
+            height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
+        
+        if config.logging.verbose:
+            print("guidance_scale:", prompt_pair.guidance_scale)
+            print("resolution:", prompt_pair.resolution)
+            print("dynamic_resolution:", prompt_pair.dynamic_resolution)
+            if prompt_pair.dynamic_resolution:
+                print("bucketed resolution:", (height, width))
+            print("batch_size:", prompt_pair.batch_size)
+
+        # 6.3. Generating latents.
+        latents = train_util.get_initial_latents(
+            noise_scheduler, prompt_pair.batch_size, height, width, 1
+        ).to(device, dtype=weight_dtype)
+
+        # 6.4. Denoising process.
+        with network:
+            denoised_latents = train_util.diffusion(
+                unet,
+                noise_scheduler,
+                latents,  # 単純なノイズのlatentsを渡す
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.target,
+                    prompt_pair.batch_size,
+                ),
+                start_timesteps=0,
+                total_timesteps=timesteps_to,
+                guidance_scale=3,
+            )
+
+        noise_scheduler.set_timesteps(1000)
+        current_timestep = noise_scheduler.timesteps[
+            int(timesteps_to * 1000 / config.train.max_denoising_steps)
+        ]
 
 
 def main(args):
