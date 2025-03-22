@@ -5,7 +5,7 @@ from safetensors.torch import save_file
 
 import os
 import math
-from typing import Optional, Literal, List
+from typing import Optional, Literal, List, Type, Set
 
 TRAINING_METHODS = Literal[
     "noxattn",  # train all layers except x-attns and time_embed layers
@@ -82,6 +82,17 @@ class LoRAModule(nn.Module):
         
         self.multiplier = multiplier
         self.org_module = org_module
+    
+    def apply_to(self):
+        self.org_forward = self.org_module.forward
+        self.org_module.forward = self.forward
+        del self.org_module
+
+    def forward(self, x):
+        return (
+            self.org_forward(x)
+            + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
+        )
 
 
 class LoRANetwork(nn.Module):
@@ -126,7 +137,7 @@ class LoRANetwork(nn.Module):
             )
 
         del unet
-        torch.cuda.empty.cache()
+        torch.cuda.empty_cache()
 
     def create_modules(
         self,
@@ -197,3 +208,30 @@ class LoRANetwork(nn.Module):
 
         return all_params
     
+    def save_weights(self, file, dtype=None, metadata: Optional[dict] = None):
+        state_dict = self.state_dict()
+
+        if dtype is not None:
+            for key in list(state_dict.keys()):
+                v = state_dict[key]
+                v = v.detach().clone().to("cpu").to(dtype)
+                state_dict[key] = v
+
+#         for key in list(state_dict.keys()):
+#             if not key.startswith("lora"):
+#                 # lora以外除外
+#                 del state_dict[key]
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            save_file(state_dict, file, metadata)
+        else:
+            torch.save(state_dict, file)
+
+        def __enter__(self):
+            for lora in self.unet_loras:
+                lora.multiplier = 1.0 * self.lora_scale
+
+        def __exit__(self, exc_type, exc_value, tb):
+            for lora in self.unet_loras:
+                lora.multiplier = 0
+                

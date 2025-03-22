@@ -77,7 +77,8 @@ def get_lr_scheduler(
         raise ValueError(
             "Scheduler must be cosine, cosine_with_restarts, step, linear or constant"
         )
-    
+ # -----------------------------------------------------------
+
 
 def text_tokenize(
     tokenizer: CLIPTokenizer,  # 普通ならひとつ、XLならふたつ！
@@ -106,10 +107,26 @@ def encode_prompts(
     text_embeddings = text_encode(text_encoder, text_tokens)
 
     return text_embeddings
+ # -----------------------------------------------------------
 
 
 UNET_IN_CHANNELS = 4  # Stable Diffusion の in_channels は 4 で固定。XLも同じ。
 VAE_SCALE_FACTOR = 8  # 2 ** (len(vae.config.block_out_channels) - 1) = 8
+
+
+def get_random_resolution_in_bucket(bucket_resolution: int = 512) -> tuple[int, int]:
+    max_resolution = bucket_resolution
+    min_resolution = bucket_resolution // 2
+
+    step = 64
+
+    min_step = min_resolution // step
+    max_step = max_resolution // step
+
+    height = torch.randint(min_step, max_step, (1,)).item() * step
+    width = torch.randint(min_step, max_step, (1,)).item() * step
+
+    return height, width
 
 
 def get_random_noise(
@@ -140,7 +157,8 @@ def get_initial_latents(
     latents = noise * scheduler.init_noise_sigma
 
     return latents
-
+ # -----------------------------------------------------------
+ 
 
 # ref: https://github.com/huggingface/diffusers/blob/0bab447670f47c28df60fbd2f6a0f833f75a16f5/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L721
 def predict_noise(
@@ -152,7 +170,7 @@ def predict_noise(
     guidance_scale=7.5,
 ) -> torch.FloatTensor:
     
-    # Expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
+    # Expand the latents if we are doing classifier-free guidance to avoid doing two forward passes
     latent_model_input = torch.cat([latents] * 2)
     latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
 

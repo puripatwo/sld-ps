@@ -51,3 +51,4 @@ transformers==4.27.4
 wandb==0.12.21
 xformers==0.0.21
 accelerate==0.16.0
+huggingface_hub==0.20.1
