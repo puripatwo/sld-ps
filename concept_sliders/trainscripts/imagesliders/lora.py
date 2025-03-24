@@ -69,7 +69,7 @@ class LoRAModule(nn.Module):
             padding = org_module.padding
             self.lora_down = nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
             self.lora_up = nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
-
+        
         if type(alpha) == torch.Tensor:
             alpha = alpha.detach().numpy()
         alpha = lora_dim if alpha is None or alpha == 0 else alpha
@@ -178,7 +178,7 @@ class LoRANetwork(nn.Module):
                         if train_method == 'noxattn-hspace-last':
                             if 'mid_block' not in name or '.1' not in name or 'conv2' not in child_name:
                                 continue
-
+                        
                         lora_name = prefix + "." + name + "." + child_name
                         lora_name = lora_name.replace(".", "_")
                         lora = self.module(lora_name, child_module, multiplier, rank, self.alpha)
@@ -212,7 +212,7 @@ class LoRANetwork(nn.Module):
                 v = state_dict[key]
                 v = v.detach().clone().to("cpu").to(dtype)
                 state_dict[key] = v
-
+        
 #         for key in list(state_dict.keys()):
 #             if not key.startswith("lora"):
 #                 # lora以外除外
@@ -222,12 +222,15 @@ class LoRANetwork(nn.Module):
             save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)
+    
+    def set_lora_slider(self, scale):
+        self.lora_scale = scale
 
-        def __enter__(self):
-            for lora in self.unet_loras:
-                lora.multiplier = 1.0 * self.lora_scale
+    def __enter__(self):
+        for lora in self.unet_loras:
+            lora.multiplier = 1.0 * self.lora_scale
 
-        def __exit__(self, exc_type, exc_value, tb):
-            for lora in self.unet_loras:
-                lora.multiplier = 0
-                
+    def __exit__(self, exc_type, exc_value, tb):
+        for lora in self.unet_loras:
+            lora.multiplier = 0
+            

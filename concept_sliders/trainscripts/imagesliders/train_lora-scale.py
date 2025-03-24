@@ -1,8 +1,12 @@
 import torch
 import gc
+import os, glob
 import argparse
 import ast
 import wandb
+import random
+import numpy as np
+from PIL import Image
 from typing import Optional, List
 from pathlib import Path
 from tqdm import tqdm
@@ -24,10 +28,15 @@ def flush():
     gc.collect()
 
 
-def train(config: RootConfig, prompts: list[PromptSettings], device: int):
+def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder_main: str, folders, scales):
+    scales = np.array(scales)
+    folders = np.array(folders)
+    scales_unique = list(scales)
+
     # Create a prompt dictionary
     metadata = {
         "prompts": ",".join([prompt.json() for prompt in prompts]),
+        "config": config.json(),
     }
     save_path = Path(config.save.path)
 
@@ -37,17 +46,17 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
 
     if config.logging.verbose:
         print(metadata)
-
+    
     # Initialize wandb
     if config.logging.use_wandb:
         wandb.init(project=f"LECO_{config.save.name}", config=metadata)
-
+    
     # Set the precision
     weight_dtype = config_util.parse_precision(config.train.precision)
     save_weight_dtype = config_util.parse_precision(config.train.precision)
 
     # 1. Load the pre-trained models.
-    tokenizer, text_encoder, unet, noise_scheduler = model_util.load_models(
+    tokenizer, text_encoder, unet, noise_scheduler, vae = model_util.load_models(
         config.pretrained_model.name_or_path,
         scheduler_name=config.train.noise_scheduler,
         v2=config.pretrained_model.v2,
@@ -154,7 +163,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
                 torch.randint(0, len(prompt_pairs), (1,)).item()
             ]
             
-            timesteps_to = torch.randint(1, config.train.max_denoising_steps, (1,)).item()
+            timesteps_to = torch.randint(1, config.train.max_denoising_steps - 1, (1,)).item()  # 1, 25, (1,)
 
             # 6.2. Set up dynamic resolution.
             height, width = (prompt_pair.resolution, prompt_pair.resolution)
@@ -168,27 +177,46 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
                 if prompt_pair.dynamic_resolution:
                     print("bucketed resolution:", (height, width))
                 print("batch_size:", prompt_pair.batch_size)
+            
+            # 6.3. Select an image pair from folders.
+            scale_to_look = abs(random.choice(list(scales_unique)))
+            folder1 = folders[scales==-scale_to_look][0]  # folder1 = 'smallsize'
+            folder2 = folders[scales==scale_to_look][0]  # folder2 = 'bigsize'
 
-            # 6.3. Generating latents.
-            latents = train_util.get_initial_latents(
-                noise_scheduler, prompt_pair.batch_size, height, width, 1
-            ).to(device, dtype=weight_dtype)
+            ims = os.listdir(f'{folder_main}/{folder1}/')  # datasets/eyesize/smallsize/
+            ims = [im_ for im_ in ims if '.png' in im_ or '.jpg' in im_ or '.jpeg' in im_ or '.webp' in im_]
 
-            # 6.4. Denoising process.
-            with network:
-                denoised_latents = train_util.diffusion(
-                    unet,
-                    noise_scheduler,
-                    latents,  # 単純なノイズのlatentsを渡す
-                    train_util.concat_embeddings(
-                        prompt_pair.unconditional,
-                        prompt_pair.target,
-                        prompt_pair.batch_size,
-                    ),
-                    start_timesteps=0,
-                    total_timesteps=timesteps_to,
-                    guidance_scale=3,
-                )
+            # 6.3. Retrieve the input images.
+            random_sampler = random.randint(0, len(ims)-1)
+            img1 = Image.open(f'{folder_main}/{folder1}/{ims[random_sampler]}').resize((256,256))
+            img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
+
+            seed = random.randint(0, 2 * 15)
+            generator = torch.manual_seed(seed)
+
+            # 6.4. Encode images into latents and add noise.
+            denoised_latents_low, low_noise = train_util.get_noisy_image(
+                img1,
+                vae,
+                generator,
+                unet,
+                noise_scheduler,
+                start_timesteps=0,
+                total_timesteps=timesteps_to)
+            denoised_latents_low = denoised_latents_low.to(device, dtype=weight_dtype)
+            low_noise = low_noise.to(device, dtype=weight_dtype)
+
+            generator = torch.manual_seed(seed)
+            denoised_latents_high, high_noise = train_util.get_noisy_image(
+                img2,
+                vae,
+                generator,
+                unet,
+                noise_scheduler,
+                start_timesteps=0,
+                total_timesteps=timesteps_to)
+            denoised_latents_high = denoised_latents_high.to(device, dtype=weight_dtype)
+            high_noise = high_noise.to(device, dtype=weight_dtype)
 
             # 6.5. Set to be in the same proportions as max_denoising_steps.
             noise_scheduler.set_timesteps(1000)
@@ -196,103 +224,98 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
                 int(timesteps_to * 1000 / config.train.max_denoising_steps)
             ]
 
-            # Predicting noise of positive latents
-            positive_latents = train_util.predict_noise(
+            # Predicting noise of high latents
+            high_latents = train_util.predict_noise(
                 unet,
                 noise_scheduler,
                 current_timestep,
-                denoised_latents,
+                denoised_latents_high,
                 train_util.concat_embeddings(
                     prompt_pair.unconditional,
                     prompt_pair.positive,
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
-            ).to(device, dtype=weight_dtype)
+            ).to("cpu", dtype=torch.float32)
 
-            # Predicting noise of neutral latents
-            neutral_latents = train_util.predict_noise(
+            # Predicting noise of low latents
+            low_latents = train_util.predict_noise(
                 unet,
                 noise_scheduler,
                 current_timestep,
-                denoised_latents,
+                denoised_latents_low,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.unconditional,
+                    prompt_pair.batch_size,
+                ),
+                guidance_scale=1,
+            ).to("cpu", dtype=torch.float32)
+
+            if config.logging.verbose:
+                print("high_latents:", high_latents[0, 0, :5, :5])
+                print("low_latents:", low_latents[0, 0, :5, :5])
+
+        # 6.6. Train with positive scale.
+        network.set_lora_slider(scale=scale_to_look)
+        with network:
+            # Predicting noise of target latents (high)
+            target_latents_high = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents_high,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.positive,
+                    prompt_pair.batch_size,
+                ),
+                guidance_scale=1,
+            ).to("cpu", dtype=torch.float32)
+
+        high_latents.requires_grad = False
+        low_latents.requires_grad = False
+
+        loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
+        pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
+        loss_high.backward()
+
+        # 6.7. Train with negative scale.
+        network.set_lora_slider(scale=-scale_to_look)
+        with network:
+            # Predicting noise of target latents (low)
+            target_latents_low = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents_low,
                 train_util.concat_embeddings(
                     prompt_pair.unconditional,
                     prompt_pair.neutral,
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
-            ).to(device, dtype=weight_dtype)
-
-            # Predicting noise of unconditional latents
-            unconditional_latents = train_util.predict_noise(
-                unet,
-                noise_scheduler,
-                current_timestep,
-                denoised_latents,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.unconditional,
-                    prompt_pair.batch_size,
-                ),
-                guidance_scale=1,
-            ).to(device, dtype=weight_dtype)
-
-            if config.logging.verbose:
-                print("positive_latents:", positive_latents[0, 0, :5, :5])
-                print("neutral_latents:", neutral_latents[0, 0, :5, :5])
-                print("unconditional_latents:", unconditional_latents[0, 0, :5, :5])
+            ).to("cpu", dtype=torch.float32)
+            
+        high_latents.requires_grad = False
+        low_latents.requires_grad = False
         
-        # Predicting noise of target latents
-        with network:
-            target_latents = train_util.predict_noise(
-                unet,
-                noise_scheduler,
-                current_timestep,
-                denoised_latents,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.target,
-                    prompt_pair.batch_size,
-                ),
-                guidance_scale=1,
-            ).to(device, dtype=weight_dtype)
+        loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
+        pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
+        loss_low.backward()
 
-            if config.logging.verbose:
-                print("target_latents:", target_latents[0, 0, :5, :5])
-
-        positive_latents.requires_grad = False
-        neutral_latents.requires_grad = False
-        unconditional_latents.requires_grad = False
-
-        # 6.6. Calculating the loss.
-        loss = prompt_pair.loss(
-            target_latents=target_latents,
-            positive_latents=positive_latents,
-            neutral_latents=neutral_latents,
-            unconditional_latents=unconditional_latents,
-        )
-
-        # 6.7. Logs loss and learning rate to wandb for monitoring.
-        pbar.set_description(f"Loss*1k: {loss.item()*1000:.4f}")
-        if config.logging.use_wandb:
-            wandb.log({"loss": loss, "iteration": i, "lr": lr_scheduler.get_last_lr()[0]})
-
-        # 6.8. Performing backpropagation to update LoRA parameters.
-        loss.backward()
         optimizer.step()
         lr_scheduler.step()
 
         del (
-            positive_latents,
-            neutral_latents,
-            unconditional_latents,
-            target_latents,
-            latents,
+            high_latents,
+            low_latents,
+            target_latents_low,
+            target_latents_high,
         )
         flush()
 
-        # 6.9. Saves model checkpoints periodically.
+        # 6.8. Saves model checkpoints periodically.
         if (i % config.save.per_steps == 0 and i != 0 and i != config.train.iterations - 1):
             print("Saving...")
             save_path.mkdir(parents=True, exist_ok=True)
@@ -320,7 +343,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     flush()
 
     print("Done.")
-            
+
 
 def main(args):
     config_file = args.config_file
@@ -332,27 +355,43 @@ def main(args):
     if args.attributes is not None:
         attributes = args.attributes.split(',')
         attributes = [a.strip() for a in attributes]
-    if args.prompts_file is not None:
-        config.prompts_file = args.prompts_file
-    if args.alpha is not None:
-        config.network.alpha = args.alpha
-    if args.rank is not None:
-        config.network.rank = args.rank
-
-    config.save.name += f'_alpha{config.network.alpha}'
-    config.save.name += f'_rank{config.network.rank}'
-    config.save.name += f'_{config.network.training_method}'
-    config.save.path += f'/{config.save.name}'
+    
+    config.network.alpha = args.alpha
+    config.network.rank = args.rank
+    config.save.name += f'_alpha{args.alpha}'
+    config.save.name += f'_rank{config.network.rank }'
+    config.save.name += f'_{config.network.training_method}'  # eyeslider_alpha1.0_rank4_noxattn
+    config.save.path += f'/{config.save.name}'  # ./models/eyeslider_alpha1.0_rank4_noxattn
 
     prompts = prompt_util.load_prompts_from_yaml(config.prompts_file, attributes)
     print(prompts)
-
+    
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.device}")
     else:
         device = "cpu"
 
-    train(config, prompts, device)
+    folders = args.folders.split(',')
+    folders = [f.strip() for f in folders]
+    scales = args.scales.split(',')
+    scales = [f.strip() for f in scales]
+    scales = [int(s) for s in scales]
+
+    print(folders, scales)
+    if len(scales) != len(folders):
+        raise Exception('the number of folders need to match the number of scales')
+    
+    if args.style_check is not None:
+        check = args.style_check.split('-')
+        for i in range(int(check[0]), int(check[1])):
+            folder_main = args.folder_main + f'{i}'  # datasets/eyesize/{i}
+            config.save.name = f'{os.path.basename(folder_main)}'
+            config.save.name += f'_alpha{args.alpha}'
+            config.save.name += f'_rank{config.network.rank }'  # {i}_alpha1.0_rank4
+            config.save.path = f'models/{config.save.name}'  # models/{i}_alpha1.0_rank4
+            train(config=config, prompts=prompts, device=device, folder_main=folder_main)
+    else:
+        train(config=config, prompts=prompts, device=device, folder_main=args.folder_main, folders=folders, scales=scales)
 
 
 if __name__ == "__main__":
@@ -364,6 +403,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, required=False, default=0, help="Device to train on.") # --device 0
     parser.add_argument("--name", type=str, required=False, default=None, help="Name of the slider.") # --name 'eyesize_slider'
     parser.add_argument("--attributes", type=str, required=False, default=None, help="Attributes to disentangle (comma seperated string).") # --attributes 'male, female'
+    parser.add_argument("--folder_main", type=str, required=True, help="The folder to check.")
+    parser.add_argument("--folders", type=str, required=False, default='verylow, low, high, veryhigh', help="Folders with different attribute-scaled images.")
+    parser.add_argument("--style_check", type=str, required=False, default=None, help="The style to check.")
+    parser.add_argument("--scales", type=str, required=False, default='-2, -1, 1, 2', help="Scales for different attribute-scaled images.")
     args = parser.parse_args()
 
     main(args)

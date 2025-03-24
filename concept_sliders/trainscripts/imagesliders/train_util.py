@@ -4,6 +4,8 @@ from tqdm import tqdm
 
 from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import UNet2DConditionModel, SchedulerMixin
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.utils import randn_tensor
 
 from model_util import SDXL_TEXT_ENCODER_TYPE
 
@@ -46,7 +48,7 @@ def get_optimizer(name: str):
             return prodigyopt.Prodigy
         else:
             raise ValueError("Optimizer must be adam, adamw, lion or Prodigy")
-        
+
 
 def get_lr_scheduler(
     name: Optional[str],
@@ -96,7 +98,7 @@ def text_tokenize(
 def text_encode(text_encoder: CLIPTextModel, tokens):
     return text_encoder(tokens.to(text_encoder.device))[0]
 
-    
+
 def encode_prompts(
     tokenizer: CLIPTokenizer,
     text_encoder: CLIPTokenizer,
@@ -108,7 +110,6 @@ def encode_prompts(
 
     return text_embeddings
 # -----------------------------------------------------------
-
 
 UNET_IN_CHANNELS = 4  # Stable Diffusion の in_channels は 4 で固定。XLも同じ。
 VAE_SCALE_FACTOR = 8  # 2 ** (len(vae.config.block_out_channels) - 1) = 8
@@ -128,35 +129,38 @@ def get_random_resolution_in_bucket(bucket_resolution: int = 512) -> tuple[int, 
 
     return height, width
 
-
-def get_random_noise(
-    batch_size: int, height: int, width: int, generator: torch.Generator = None
-) -> torch.Tensor:
-    return torch.randn(
-        (
-            batch_size,
-            UNET_IN_CHANNELS,
-            height // VAE_SCALE_FACTOR,  # 縦と横これであってるのかわからないけど、どっちにしろ大きな問題は発生しないのでこれでいいや
-            width // VAE_SCALE_FACTOR,
-        ),
-        generator=generator,
-        device="cpu",
-    )
-
-
-def get_initial_latents(
+@torch.no_grad()
+def get_noisy_image(
+    img,
+    vae,
+    generator,
+    unet: UNet2DConditionModel,
     scheduler: SchedulerMixin,
-    n_imgs: int,
-    height: int,
-    width: int,
-    n_prompts: int,
-    generator=None,
-) -> torch.Tensor:
+    total_timesteps: int = 1000,
+    start_timesteps=0,
     
-    noise = get_random_noise(n_imgs, height, width, generator=generator).repeat(n_prompts, 1, 1, 1)
-    latents = noise * scheduler.init_noise_sigma
+    **kwargs,
+):
+    vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+    image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor)
 
-    return latents
+    image = img
+    im_orig = image
+    device = vae.device
+    image = image_processor.preprocess(image).to(device)
+
+    init_latents = vae.encode(image).latent_dist.sample(None)
+    init_latents = vae.config.scaling_factor * init_latents
+    init_latents = torch.cat([init_latents], dim=0)
+
+    shape = init_latents.shape
+    noise = randn_tensor(shape, generator=generator, device=device)
+
+    time_ = total_timesteps
+    timestep = scheduler.timesteps[time_:time_+1]
+    init_latents = scheduler.add_noise(init_latents, noise, timestep)
+
+    return init_latents, noise
 # -----------------------------------------------------------
  
 
@@ -188,29 +192,6 @@ def predict_noise(
     )
 
     return guided_target
-
-
-# ref: https://github.com/huggingface/diffusers/blob/0bab447670f47c28df60fbd2f6a0f833f75a16f5/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L746
-@torch.no_grad()
-def diffusion(
-    unet: UNet2DConditionModel,
-    scheduler: SchedulerMixin,
-    latents: torch.FloatTensor,  # ただのノイズだけのlatents
-    text_embeddings: torch.FloatTensor,
-    total_timesteps: int = 1000,
-    start_timesteps=0,
-    **kwargs,
-):
-    
-    for timestep in tqdm(scheduler.timesteps[start_timesteps:total_timesteps]):
-        noise_pred = predict_noise(
-            unet, scheduler, timestep, latents, text_embeddings, **kwargs
-        )
-
-        # Compute the previous noisy sample x_t -> x_t-1
-        latents = scheduler.step(noise_pred, timestep, latents).prev_sample
-
-    return latents
 
 
 def concat_embeddings(
