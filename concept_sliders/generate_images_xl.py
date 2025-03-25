@@ -24,7 +24,7 @@ from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipelineOut
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 from safetensors.torch import load_file
 
-from lora import LoRANetwork, DEFAULT_TARGET_REPLACE, UNET_TARGET_REPLACE_MODULE_CONV
+from trainscripts.textsliders.lora import LoRANetwork, DEFAULT_TARGET_REPLACE, UNET_TARGET_REPLACE_MODULE_CONV
 
 
 def flush():
