@@ -10,6 +10,12 @@ from diffusers.utils import randn_tensor
 from model_util import SDXL_TEXT_ENCODER_TYPE
 
 
+# https://www.crosslabs.org/blog/diffusion-with-offset-noise
+def apply_noise_offset(latents: torch.FloatTensor, noise_offset: float):
+    latents = latents + noise_offset * torch.randn((latents.shape[0], latents.shape[1], 1, 1), device=latents.device)
+    return latents
+
+
 def get_optimizer(name: str):
     name = name.lower()
 

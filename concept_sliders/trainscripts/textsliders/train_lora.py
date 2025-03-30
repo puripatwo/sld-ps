@@ -62,6 +62,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     unet.requires_grad_(False)
     unet.eval() # Freezes UNet
 
+    ### LoRA ###
     # 2. Set up LoRA.
     network = LoRANetwork(
         unet,
@@ -161,13 +162,13 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
             if prompt_pair.dynamic_resolution:
                 height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
             
-            if config.logging.verbose:
-                print("guidance_scale:", prompt_pair.guidance_scale)
-                print("resolution:", prompt_pair.resolution)
-                print("dynamic_resolution:", prompt_pair.dynamic_resolution)
-                if prompt_pair.dynamic_resolution:
-                    print("bucketed resolution:", (height, width))
-                print("batch_size:", prompt_pair.batch_size)
+            # if config.logging.verbose:
+            #     print("guidance_scale:", prompt_pair.guidance_scale)
+            #     print("resolution:", prompt_pair.resolution)
+            #     print("dynamic_resolution:", prompt_pair.dynamic_resolution)
+            #     if prompt_pair.dynamic_resolution:
+            #         print("bucketed resolution:", (height, width))
+            #     print("batch_size:", prompt_pair.batch_size)
 
             # 6.3. Generating latents.
             latents = train_util.get_initial_latents(

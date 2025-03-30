@@ -38,6 +38,10 @@ from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_xformers_available
 
+import train_util
+import prompt_util
+from prompt_util import PromptEmbedsCache, PromptEmbedsPair, PromptSettings
+
 if is_wandb_available():
     import wandb
 
@@ -120,15 +124,14 @@ def parse_args():
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
 
+    # TODO: Do visual prompt sliders
     if args.train_data_dir is None:
         raise ValueError("You must specify a train data directory when using visual prompt sliders.")
     
     return args
 
 
-if __name__ == "__main__":
-    args = parse_args()
-
+def main(args):
     # Check if WandB is available
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -181,19 +184,20 @@ if __name__ == "__main__":
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant)
 
     ### TEXTUAL INVERSION ###
-    # 2. Add the placeholder token in tokenizer.
+    # 2. Set up Textual Inversion.
+    # 2.1 Add the placeholder token in tokenizer.
     placeholder_tokens = [args.placeholder_token]
 
     if args.num_vectors < 1:
         raise ValueError(f"--num_vectors has to be larger or equal to 1, but is {args.num_vectors}.")
     
-    # 2.1. Add additional tokens for each vector.
+    # 2.2. Add additional tokens for each vector.
     additional_tokens = []
     for i in range(1, args.num_vectors):
         additional_tokens.append(f"{args.placeholder_token}_{i}")
     placeholder_tokens += additional_tokens
 
-    # 2.2. Add the placeholder token to the tokenizer.
+    # 2.3. Add the placeholder token to the tokenizer.
     num_added_tokens = tokenizer.add_tokens(placeholder_tokens)
     if num_added_tokens != args.num_vectors:
         raise ValueError(
@@ -201,18 +205,19 @@ if __name__ == "__main__":
             " `placeholder_token` that is not already in the tokenizer."
         )
     
-    # 2.3. Convert the initializer and placeholder tokens to IDs.
+    # 2.4. Convert the initializer and placeholder tokens to IDs.
     token_ids = tokenizer.encode(args.initializer_token, add_special_tokens=False)
     if len(token_ids) > 1:
         raise ValueError("The initializer token must be a single token.")
     
     initializer_token_id = token_ids[0]
     placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
+    placeholder_token = (" ".join(tokenizer.convert_ids_to_tokens(placeholder_token_ids)))
 
-    # 2.4. Resize the token embeddings of the text encoder.
+    # 2.5. Resize the token embeddings of the text encoder.
     text_encoder.resize_token_embeddings(len(tokenizer))
 
-    # 2.5. Initialise the newly added placeholder token with the embeddings of the initializer token.
+    # 2.6. Initialise the newly added placeholder token with the embeddings of the initializer token.
     token_embeds = text_encoder.get_input_embeddings().weight.data
     with torch.no_grad():
         for placeholder_token_id in placeholder_token_ids:
@@ -226,4 +231,312 @@ if __name__ == "__main__":
     text_encoder.text_model.encoder.requires_grad_(False)
     text_encoder.text_model.final_layer_norm.requires_grad_(False)
     text_encoder.text_model.embeddings.position_embedding.requires_grad_(False)
+
+    if args.gradient_checkpointing:
+        # Keep unet in train mode if we are using gradient checkpointing to save memory
+        unet.train()
+        text_encoder.gradient_checkpointing_enable()
+        unet.enable_gradient_checkpointing()
+
+    if args.enable_xformers_memory_efficient_attention:
+        if is_xformers_available():
+            import xformers
+            
+            xformers_version = version.parse(xformers.__version__)
+            if xformers_version == version.parse("0.0.16"):
+                logger.warn(
+                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                )
+            unet.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError("xformers is not available. Make sure it is installed correctly")
+        
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    if args.scale_lr:
+        args.learning_rate = (
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+        )
+
+    # 3. Optimizer setup.
+    optimizer = torch.optim.AdamW(
+        text_encoder.get_input_embeddings().parameters(),  # only optimize the embeddings
+        lr=args.learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
+    )
+    criteria = torch.nn.MSELoss()
+
+    # 4. Scheduler setup.
+    overrode_max_train_steps = False
+    num_update_steps_per_epoch = math.ceil(args.max_train_steps / args.gradient_accumulation_steps)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        overrode_max_train_steps = True
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_cycles=args.lr_num_cycles,
+    )
+
+    attributes = []
+    prompts = prompt_util.load_prompts_from_yaml(args.prompts_file, attributes)
+
+    cache = PromptEmbedsCache()
+    prompt_pairs: list[PromptEmbedsPair] = []
+
+    # 5. Prompt encoding and caching.
+    with torch.no_grad():
+        for settings in prompts:
+            print(settings)
+
+            for prompt in [
+                settings.target,
+                settings.positive,
+                settings.neutral,
+                settings.unconditional,
+            ]:
+                print(prompt)
+
+                if isinstance(prompt, list):
+                    if prompt == settings.positive:
+                        key_setting = 'positive'
+                    else:
+                        key_setting = 'attributes'
+                    if len(prompt) == 0:
+                        cache[key_setting] = []
+                    else:
+                        if cache[key_setting] is None:
+                            cache[key_setting] = train_util.encode_prompts(tokenizer, text_encoder, prompt)
+                else:
+                    if cache[prompt] == None:
+                        cache[prompt] = train_util.encode_prompts(tokenizer, text_encoder, [prompt])
+
+            prompt_pairs.append(PromptEmbedsPair(
+                criteria,
+                cache[settings.target],
+                cache[settings.positive],
+                cache[settings.unconditional],
+                cache[settings.neutral],
+                settings,
+            ))
     
+    # Set the text encoder to train mode
+    text_encoder.train()
+    text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
+
+    # For mixed precision training, we cast all non-trainable weights to half-precision as these weights are only used for inference, keeping weights in full precision is not required
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    # Move vae and unet to device and cast to weight_dtype
+    vae.to(accelerator.device, dtype=weight_dtype)
+    unet.to(accelerator.device, dtype=weight_dtype)
+
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed
+    num_update_steps_per_epoch = math.ceil(1 / args.gradient_accumulation_steps)
+    if overrode_max_train_steps:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+    # We need to initialize the trackers we use, and also store our configuration
+    if accelerator.is_main_process:
+        # The trackers initializes automatically on the main process
+        accelerator.init_trackers("textual_inversion", config=vars(args))
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {args.max_train_steps}")
+    logger.info(f"  Num Epochs = {args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+
+    # 6. Potentially load in the weights and states from a previous save.
+    global_step = 0
+    first_epoch = 0
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = os.path.basename(args.resume_from_checkpoint)
+        else:
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1] if len(dirs) > 0 else None
+
+        if path is None:
+            accelerator.print(
+                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+            )
+            args.resume_from_checkpoint = None
+            initial_global_step = 0
+        else:
+            accelerator.print(f"Resuming from checkpoint {path}")
+            accelerator.load_state(os.path.join(args.output_dir, path))
+            global_step = int(path.split("-")[1])
+
+            initial_global_step = global_step
+            first_epoch = global_step // num_update_steps_per_epoch
+    else:
+        initial_global_step = 0
+
+    # Calculate the total batch size
+    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
+    # Keep the original embeddings as reference
+    orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
+
+    device = torch.device("cuda:0")
+    pbar = tqdm(range(0, args.max_train_steps), initial=initial_global_step, desc="Steps", disable=not accelerator.is_local_main_process)
+    for epoch in range(first_epoch, args.num_train_epochs):
+        text_encoder.train()
+
+        with torch.no_grad():
+            noise_scheduler.set_timesteps(
+                50, device=device
+            )
+            optimizer.zero_grad()
+
+            # 6.1. Sampling a training example.
+            prompt_pair: PromptEmbedsPair = prompt_pairs[
+                torch.randint(0, len(prompt_pairs), (1,)).item()
+            ]
+
+            timesteps_to = torch.randint(1, 50, (1,)).item()
+
+            # 6.2. Set up dynamic resolution.
+            height, width = (prompt_pair.resolution, prompt_pair.resolution)
+            if prompt_pair.dynamic_resolution:
+                height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
+
+            # if config.logging.verbose:
+            #     print("guidance_scale:", prompt_pair.guidance_scale)
+            #     print("resolution:", prompt_pair.resolution)
+            #     print("dynamic_resolution:", prompt_pair.dynamic_resolution)
+            #     if prompt_pair.dynamic_resolution:
+            #         print("bucketed resolution:", (height, width))
+            #     print("batch_size:", prompt_pair.batch_size)
+
+            # 6.3. Generating latents.
+            latents = train_util.get_initial_latents(
+                noise_scheduler, prompt_pair.batch_size, height, width, 1
+            ).to(device, dtype=weight_dtype)
+
+            # 6.4. Modify the text embedding.
+            new_target = prompt_pair.settings.target + f', {placeholder_token}'
+            sc = float(random.choice([idx for idx in range(3)]))
+            ti_prompt_1 = train_util.encode_prompts_slider(tokenizer, text_encoder, [new_target], sc=sc)
+
+            # 6.5. Denoising process.
+            denoised_latents = train_util.diffusion(
+                unet,
+                noise_scheduler,
+                latents,  # 単純なノイズのlatentsを渡す
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional.to(device),
+                    ti_prompt_1,
+                    prompt_pair.batch_size,
+                ),
+                start_timesteps=0,
+                total_timesteps=timesteps_to,
+                guidance_scale=3,
+            )
+
+            # 6.6. Set to be in the same proportions as max_denoising_steps.
+            noise_scheduler.set_timesteps(1000)
+            current_timestep = noise_scheduler.timesteps[
+                int(timesteps_to * 1000 / 50)
+            ]
+
+            # Predicting noise of positive latents
+            positive_latents = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.positive,
+                    prompt_pair.batch_size,
+                ).to(device),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
+
+            # Predicting noise of neutral latents
+            neutral_latents = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.neutral,
+                    prompt_pair.batch_size,
+                ).to(device),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
+
+            # Predicting noise of unconditional latents
+            unconditional_latents = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional,
+                    prompt_pair.unconditional,
+                    prompt_pair.batch_size,
+                ).to(device),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
+        
+        with accelerator.accumulate(text_encoder):
+            ti_prompt_2 = train_util.encode_prompts_slider(tokenizer, text_encoder, [new_target], sc=sc)
+
+            # Predicting noise of target latents
+            target_latents = train_util.predict_noise(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                train_util.concat_embeddings(
+                    prompt_pair.unconditional.to(device),
+                    ti_prompt_2,
+                    prompt_pair.batch_size,
+                ),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
+        
+            positive_latents.requires_grad = False
+            neutral_latents.requires_grad = False
+            unconditional_latents.requires_grad = False
+
+            # 6.7. Calculating the loss.
+            loss = prompt_pair.loss(
+                target_latents=target_latents,
+                positive_latents=positive_latents,
+                neutral_latents=neutral_latents,
+                unconditional_latents=unconditional_latents,
+            )
+
+            # 6.8. Performing backpropagation to update LoRA parameters.
+            accelerator.backward(loss)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    main(args)

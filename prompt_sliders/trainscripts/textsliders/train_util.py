@@ -1,11 +1,11 @@
 import torch
-from typing import Optional
+from typing import Optional, Union
 from tqdm import tqdm
 
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPTextModelWithProjection
 from diffusers import UNet2DConditionModel, SchedulerMixin
 
-from model_util import SDXL_TEXT_ENCODER_TYPE
+SDXL_TEXT_ENCODER_TYPE = Union[CLIPTextModel, CLIPTextModelWithProjection]
 
 
 # https://www.crosslabs.org/blog/diffusion-with-offset-noise
@@ -111,6 +111,23 @@ def encode_prompts(
 
     text_tokens = text_tokenize(tokenizer, prompts)
     text_embeddings = text_encode(text_encoder, text_tokens)
+
+    return text_embeddings
+
+
+def encode_prompts_slider(
+    tokenizer: CLIPTokenizer,
+    text_encoder: CLIPTokenizer,
+    prompts: list[str],
+    sc: float = 1.0,
+):
+    
+    text_tokens = text_tokenize(tokenizer, prompts)
+    text_embeddings = text_encode(text_encoder, text_tokens)
+
+    idx = text_tokens.argmax(-1)
+    batch_indices = torch.arange(len(text_tokens))
+    text_embeddings[batch_indices, idx, :] = sc * text_embeddings[batch_indices, idx, :]
 
     return text_embeddings
 # -----------------------------------------------------------
