@@ -25,24 +25,24 @@ def flush():
 
 
 def train(config: RootConfig, prompts: list[PromptSettings], device: int):
-    # Create a prompt dictionary
+    # Create a prompt dictionary (1)
     metadata = {
         "prompts": ",".join([prompt.json() for prompt in prompts]),
     }
     save_path = Path(config.save.path)
-
-    modules = DEFAULT_TARGET_REPLACE
-    if config.network.type == "c3lier":
-        modules += UNET_TARGET_REPLACE_MODULE_CONV
-
     if config.logging.verbose:
         print(metadata)
 
-    # Initialize wandb
+    # Set the network type (2)
+    modules = DEFAULT_TARGET_REPLACE # ["Attention"]
+    if config.network.type == "c3lier":
+        modules += UNET_TARGET_REPLACE_MODULE_CONV
+
+    # Initialize wandb (3)
     if config.logging.use_wandb:
         wandb.init(project=f"LECO_{config.save.name}", config=metadata)
 
-    # Set the precision
+    # Set the precision (4)
     weight_dtype = config_util.parse_precision(config.train.precision)
     save_weight_dtype = config_util.parse_precision(config.train.precision)
 
