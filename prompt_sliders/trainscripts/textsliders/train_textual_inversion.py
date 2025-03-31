@@ -31,6 +31,7 @@ from diffusers import (
     DDPMScheduler,
     DiffusionPipeline,
     DPMSolverMultistepScheduler,
+    StableDiffusionPipeline,
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
@@ -65,6 +66,85 @@ else:
 check_min_version("0.27.0.dev0")
 
 logger = get_logger(__name__)
+
+
+def save_progress(text_encoder, placeholder_token_ids, accelerator, args, save_path, safe_serialization=True):
+    logger.info("Saving embeddings...")
+
+    learned_embeds = (accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[min(placeholder_token_ids) : max(placeholder_token_ids) + 1])
+    learned_embeds_dict = {args.placeholder_token: learned_embeds.detach().cpu()}
+
+    if safe_serialization:
+        safetensors.torch.save_file(learned_embeds_dict, save_path, metadata={"format": "pt"})
+    else:
+        torch.save(learned_embeds_dict, save_path)
+
+
+def log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight_dtype, epoch):
+    logger.info(
+        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+        f" {args.validation_prompt}."
+    )
+
+    # Create a pipeline for inference
+    pipeline = DiffusionPipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        text_encoder=accelerator.unwrap_model(text_encoder),
+        tokenizer=tokenizer,
+        unet=unet,
+        vae=vae,
+        safety_checker=None,
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
+    )
+    pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
+    pipeline = pipeline.to(accelerator.device)
+    pipeline.set_progress_bar_config(disable=True)
+
+    # Run inference
+    images = []
+    generator = None if args.seed is None else torch.Generator(device=accelerator.device).manual_seed(args.seed)
+    for _ in range(args.num_validation_images):
+        with torch.autocast("cuda"):
+            image = pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
+        images.append(image)
+
+    for tracker in accelerator.trackers:
+        if tracker.name == "tensorboard":
+            np_images = np.stack([np.asarray(img) for img in images])
+            tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
+        if tracker.name == "wandb":
+            tracker.log({"validation": [wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)]})
+        
+    del pipeline
+    torch.cuda.empty_cache()
+    return images
+
+
+def save_model_card(repo_id: str, images: list = None, base_model: str = None, repo_folder: str = None):
+    img_str = ""
+    if images is not None:
+        for i, image in enumerate(images):
+            image.save(os.path.join(repo_folder, f"image_{i}.png"))
+            img_str += f"![img_{i}](./image_{i}.png)\n"
+    
+    model_description = f"""
+    Textual inversion text2image fine-tuning - {repo_id}
+    These are textual inversion adaption weights for {base_model}. You can find some example images in the following. \n
+    {img_str}
+    """
+    model_card = load_or_create_model_card(
+        repo_id_or_path=repo_id,
+        from_training=True,
+        license="creativeml-openrail-m",
+        base_model=base_model,
+        model_description=model_description,
+        inference=True,
+    )
+    tags = ["stable-diffusion", "stable-diffusion-diffusers", "text-to-image", "diffusers", "textual_inversion"]
+    model_card = populate_model_card(model_card, tags=tags)
+    model_card.save(os.path.join(repo_folder, "README.md"))
 
 
 def parse_args():
@@ -119,20 +199,21 @@ def parse_args():
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
     parser.add_argument("--no_safe_serialization", action="store_true", help="If specified save the checkpoint not in `safetensors` format, but in original PyTorch format instead.") ###
     args = parser.parse_args()
-
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
-
-    # TODO: Do visual prompt sliders
-    if args.train_data_dir is None:
-        raise ValueError("You must specify a train data directory when using visual prompt sliders.")
     
     return args
 
 
 def main(args):
-    # Check if WandB is available
+    # Check if LOCAL_RANK is set (1)
+    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if env_local_rank != -1 and env_local_rank != args.local_rank:
+        args.local_rank = env_local_rank
+
+    # Check if a train data directory is provided (2)
+    if args.train_data_dir is None:
+        raise ValueError("You must specify a train data directory when using visual prompt sliders.")
+    
+    # Check if WandB is available (3)
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
             "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
@@ -142,7 +223,12 @@ def main(args):
         if not is_wandb_available():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
     
-    # Set up Accelerator
+    # If passed along, set the training seed now (4)
+    if args.seed is not None:
+        set_seed(args.seed)
+    
+    # 0. Set up Accelerator.
+    # 0.1. Initialize the accelerator.
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
     accelerator = Accelerator(
@@ -152,23 +238,28 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
-    # Make one log on every process with the configuration for debugging
+    # 0.2. Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
     logging.info(accelerator.state, main_process_only=False)
+
+    # 0.3. Only the main process should show informational or warning logs.
     if accelerator.is_local_main_process:
         transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
-    
-    # If passed along, set the training seed now
-    if args.seed is not None:
-        set_seed(args.seed)
 
-    # Handle the repository creation
+    # 0.4. Handle the repository creation.
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
+        
+        # 0.5. Create the repo if it doesn't exist.
         if args.push_to_hub:
             repo_id = create_repo(repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token).repo_id
         
@@ -324,10 +415,6 @@ def main(args):
                 cache[settings.neutral],
                 settings,
             ))
-    
-    # Set the text encoder to train mode
-    text_encoder.train()
-    text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
 
     # For mixed precision training, we cast all non-trainable weights to half-precision as these weights are only used for inference, keeping weights in full precision is not required
     weight_dtype = torch.float32
@@ -336,7 +423,6 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Move vae and unet to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
 
@@ -344,14 +430,7 @@ def main(args):
     num_update_steps_per_epoch = math.ceil(1 / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-
-    # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-    # We need to initialize the trackers we use, and also store our configuration
-    if accelerator.is_main_process:
-        # The trackers initializes automatically on the main process
-        accelerator.init_trackers("textual_inversion", config=vars(args))
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {args.max_train_steps}")
@@ -360,6 +439,15 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
+
+    # Set the text encoder to train mode
+    text_encoder.train()
+    text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
+
+    # We need to initialize the trackers we use, and also store our configuration
+    if accelerator.is_main_process:
+        # The trackers initializes automatically on the main process
+        accelerator.init_trackers("textual_inversion", config=vars(args))
 
     # 6. Potentially load in the weights and states from a previous save.
     global_step = 0
@@ -396,6 +484,7 @@ def main(args):
     # Keep the original embeddings as reference
     orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
 
+    # 7. Start the training loop.
     device = torch.device("cuda:0")
     pbar = tqdm(range(0, args.max_train_steps), initial=initial_global_step, desc="Steps", disable=not accelerator.is_local_main_process)
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -407,14 +496,14 @@ def main(args):
             )
             optimizer.zero_grad()
 
-            # 6.1. Sampling a training example.
+            # 7.1. Sampling a training example.
             prompt_pair: PromptEmbedsPair = prompt_pairs[
                 torch.randint(0, len(prompt_pairs), (1,)).item()
             ]
 
             timesteps_to = torch.randint(1, 50, (1,)).item()
 
-            # 6.2. Set up dynamic resolution.
+            # 7.2. Set up dynamic resolution.
             height, width = (prompt_pair.resolution, prompt_pair.resolution)
             if prompt_pair.dynamic_resolution:
                 height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
@@ -427,17 +516,17 @@ def main(args):
             #         print("bucketed resolution:", (height, width))
             #     print("batch_size:", prompt_pair.batch_size)
 
-            # 6.3. Generating latents.
+            # 7.3. Generating latents.
             latents = train_util.get_initial_latents(
                 noise_scheduler, prompt_pair.batch_size, height, width, 1
             ).to(device, dtype=weight_dtype)
 
-            # 6.4. Modify the text embedding.
+            # 7.4. Modify the text embedding.
             new_target = prompt_pair.settings.target + f', {placeholder_token}'
             sc = float(random.choice([idx for idx in range(3)]))
             ti_prompt_1 = train_util.encode_prompts_slider(tokenizer, text_encoder, [new_target], sc=sc)
 
-            # 6.5. Denoising process.
+            # 7.5. Denoising process.
             denoised_latents = train_util.diffusion(
                 unet,
                 noise_scheduler,
@@ -452,7 +541,7 @@ def main(args):
                 guidance_scale=3,
             )
 
-            # 6.6. Set to be in the same proportions as max_denoising_steps.
+            # 7.6. Set to be in the same proportions as max_denoising_steps.
             noise_scheduler.set_timesteps(1000)
             current_timestep = noise_scheduler.timesteps[
                 int(timesteps_to * 1000 / 50)
@@ -521,7 +610,7 @@ def main(args):
             neutral_latents.requires_grad = False
             unconditional_latents.requires_grad = False
 
-            # 6.7. Calculating the loss.
+            # 7.7. Calculating the loss.
             loss = prompt_pair.loss(
                 target_latents=target_latents,
                 positive_latents=positive_latents,
@@ -529,11 +618,119 @@ def main(args):
                 unconditional_latents=unconditional_latents,
             )
 
-            # 6.8. Performing backpropagation to update LoRA parameters.
+            # 7.8. Performing backpropagation to update the text embeddings.
             accelerator.backward(loss)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
+
+            # 7.9. Make sure we don't update any embedding weights besides the newly added token.
+            index_no_updates = torch.ones((len(tokenizer),), dtype=torch.bool)
+            index_no_updates[min(placeholder_token_ids) : max(placeholder_token_ids) + 1] = False
+            with torch.no_grad():
+                accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[index_no_updates] = orig_embeds_params[index_no_updates]
+
+            # 7.10. Check if the accelerator has performed an optimization step behind the scenes.
+            if accelerator.sync_gradients:
+                images = []
+                pbar.update(1)
+                global_step += 1
+
+                # Saving the learned embeddings
+                if global_step % args.save_steps == 0:
+                    weight_name = (f"learned_embeds-steps-{global_step}.bin" if args.no_safe_serialization else f"learned_embeds-steps-{global_step}.safetensors")
+                    save_path = os.path.join(args.output_dir, weight_name)
+                    save_progress(
+                        text_encoder,
+                        placeholder_token_ids,
+                        accelerator,
+                        args,
+                        save_path,
+                        safe_serialization=not args.no_safe_serialization,
+                    )
+
+                # Saving the checkpoints
+                if accelerator.is_main_process:
+                    if global_step % args.checkpointing_steps == 0:
+                        if args.checkpoints_total_limit is not None:
+                            checkpoints = os.listdir(args.output_dir)
+                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                            # Before we save the new checkpoint, we need to have at most `checkpoints_total_limit - 1` checkpoints
+                            if len(checkpoints) >= args.checkpoints_total_limit:
+                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                                removing_checkpoints = checkpoints[0:num_to_remove]
+
+                                logger.info(f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints")
+                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                                for removing_checkpoint in removing_checkpoints:
+                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                                    shutil.rmtree(removing_checkpoint)
+                        
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
+
+                    # Generate and log validation images
+                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                        images = log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight_dtype, epoch)
+
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            pbar.set_postfix(**logs)
+            accelerator.log(logs, step=global_step)
+
+            if global_step >= args.max_train_steps:
+                break
+
+    # 8. Create the pipeline using the trained modules and save it.
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        if args.push_to_hub and not args.save_as_full_pipeline:
+            logger.warn("Enabling full model saving because --push_to_hub=True was specified.")
+            save_full_model = True
+        else:
+            save_full_model = args.save_as_full_pipeline
+        if save_full_model:
+            pipeline = StableDiffusionPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                vae=vae,
+                unet=unet,
+                tokenizer=tokenizer,
+            )
+            pipeline.save_pretrained(args.output_dir)
+        
+        # 9. Save the newly trained embeddings.
+        weight_name = "learned_embeds.bin" if args.no_safe_serialization else "learned_embeds.safetensors"
+        save_path = os.path.join(args.output_dir, weight_name)
+        save_progress(
+            text_encoder,
+            placeholder_token_ids,
+            accelerator,
+            args,
+            save_path,
+            safe_serialization=not args.no_safe_serialization,
+        )
+
+        # 10. Push to the Hub if necessary.
+        if args.push_to_hub:
+            save_model_card(
+                repo_id,
+                images=images,
+                base_model=args.pretrained_model_name_or_path,
+                repo_folder=args.output_dir,
+            )
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=args.output_dir,
+                commit_message="End of training",
+                ignore_patterns=["step_*", "epoch_*"],
+            )
+    
+    accelerator.end_training()
+    print("Done.")
 
 
 if __name__ == "__main__":
