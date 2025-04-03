@@ -176,13 +176,13 @@ def parse_args():
     parser.add_argument("--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler.")
     parser.add_argument("--lr_num_cycles", type=int, default=1, help="Number of hard resets of the lr in cosine_with_restarts scheduler.")
     parser.add_argument("--dataloader_num_workers", type=int, default=0, help="Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process.")
-    # parser.add_argument("--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes.")
-    # parser.add_argument("--prompts_file", type=str, default=None, help="prompt file.")
-    # parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    # parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    # parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    # parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer.")
-    # parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument("--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes.")
+    parser.add_argument("--prompts_file", type=str, default=None, help="prompt file.")
+    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
+    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer.")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
     parser.add_argument("--hub_model_id", type=str, default=None, help="The name of the repository to keep in sync with the local `output_dir`.")
     parser.add_argument("--logging_dir", type=str, default="logs", help="[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***.")
@@ -254,7 +254,7 @@ def main(args):
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
-    # 0.4. Handle the repository creation.
+    # 0.4. Handle the repository creation; use is_main_process to ensure that only the main process does this.
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
@@ -300,8 +300,8 @@ def main(args):
     token_ids = tokenizer.encode(args.initializer_token, add_special_tokens=False)
     if len(token_ids) > 1:
         raise ValueError("The initializer token must be a single token.")
-    
     initializer_token_id = token_ids[0]
+
     placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
     placeholder_token = (" ".join(tokenizer.convert_ids_to_tokens(placeholder_token_ids)))
 
@@ -347,7 +347,10 @@ def main(args):
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate
+            * args.gradient_accumulation_steps
+            * args.train_batch_size
+            * accelerator.num_processes
         )
 
     # 3. Optimizer setup.
@@ -360,27 +363,13 @@ def main(args):
     )
     criteria = torch.nn.MSELoss()
 
-    # 4. Scheduler setup.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(args.max_train_steps / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-        num_cycles=args.lr_num_cycles,
-    )
-
     attributes = []
     prompts = prompt_util.load_prompts_from_yaml(args.prompts_file, attributes)
 
     cache = PromptEmbedsCache()
     prompt_pairs: list[PromptEmbedsPair] = []
 
-    # 5. Prompt encoding and caching.
+    # 4. Prompt encoding and caching.
     with torch.no_grad():
         for settings in prompts:
             print(settings)
@@ -416,6 +405,24 @@ def main(args):
                 settings,
             ))
 
+    # 5. Scheduler setup.
+    overrode_max_train_steps = False
+    num_update_steps_per_epoch = math.ceil(args.max_train_steps / args.gradient_accumulation_steps)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        overrode_max_train_steps = True
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_cycles=args.lr_num_cycles,
+    )
+
+    # Set the text encoder to train mode
+    text_encoder.train()
+    text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
+
     # For mixed precision training, we cast all non-trainable weights to half-precision as these weights are only used for inference, keeping weights in full precision is not required
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -423,6 +430,7 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
+    # Move vae and unet to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
 
@@ -432,6 +440,14 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
+    # We need to initialize the trackers we use, and also store our configuration
+    if accelerator.is_main_process:
+        # The trackers initializes automatically on the main process
+        accelerator.init_trackers("textual_inversion", config=vars(args))
+
+    # Calculate the total batch size
+    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {args.max_train_steps}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
@@ -439,15 +455,6 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-
-    # Set the text encoder to train mode
-    text_encoder.train()
-    text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
-
-    # We need to initialize the trackers we use, and also store our configuration
-    if accelerator.is_main_process:
-        # The trackers initializes automatically on the main process
-        accelerator.init_trackers("textual_inversion", config=vars(args))
 
     # 6. Potentially load in the weights and states from a previous save.
     global_step = 0
@@ -477,9 +484,6 @@ def main(args):
             first_epoch = global_step // num_update_steps_per_epoch
     else:
         initial_global_step = 0
-
-    # Calculate the total batch size
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     # Keep the original embeddings as reference
     orig_embeds_params = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight.data.clone()
