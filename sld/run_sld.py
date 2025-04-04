@@ -6,6 +6,7 @@ import json
 import copy
 import shutil
 import random
+import logging
 import numpy as np
 from PIL import Image
 import torch
@@ -23,25 +24,51 @@ from llm.llm_parser_template import spot_object_template
 from llm.llm_controller_template import spot_difference_template
 from llm.llm_chat import get_key_objects, get_updated_layout
 
+from eval.eval import Evaluator, eval_prompt
+from eval.lmd import get_lmd_prompts
 
-def spot_objects(prompt, data, config):
-    if data.get("llm_parsed_prompt") is None:
-        questions = f"User Prompt: {prompt}\nReasoning:\n"
-        message = spot_object_template + questions
-        results = get_key_objects(message, config)
-        return results[0]
-    else:
-        return data["llm_parsed_prompt"]
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+)
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(console_handler)
 
 
-def spot_differences(prompt, det_results, data, config, mode="self_correction"):
-    if data.get("llm_layout_suggestions") is None:
-        questions = (f"User Prompt: {prompt}\nCurrent Objects: {det_results}\nReasoning:\n")
-        message = spot_difference_template + questions
-        llm_suggestions = get_updated_layout(message, config)
-        return llm_suggestions[0]
-    else:
-        return data["llm_layout_suggestions"]
+def run_llm_parser(prompt, config):
+    questions = f"User Prompt: {prompt}\nReasoning:\n"
+    message = spot_object_template + questions
+    results = get_key_objects(message, config)
+    return results
+
+
+def run_llm_controller(prompt, det_results, config, mode="self_correction"):
+    questions = (f"User Prompt: {prompt}\nCurrent Objects: {det_results}\nReasoning:\n")
+    message = spot_difference_template + questions
+    llm_suggestions = get_updated_layout(message, config)
+    return llm_suggestions
+
+
+def set_file_handler(log_file_name):
+    # Get the root logger
+    logger = logging.getLogger()
+
+    # Remove all existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    logger.addHandler(console_handler)
+
+    # Create a file handler
+    file_handler = logging.FileHandler(log_file_name, mode='w')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 
 # Operation #2: Deletion (Preprocessing region mask for removal)
@@ -51,7 +78,7 @@ def get_remove_region(entry, remove_objects, move_objects, preserve_objs, models
     image_source = np.array(Image.open(entry["output"][-1]))
     H, W, _ = image_source.shape
 
-    # if no remove objects, set zero to the whole mask
+    # If there are no objects to be moved, set zero to the whole mask
     if (len(remove_objects) + len(move_objects)) == 0:
         remove_region = np.zeros((W // 8, H // 8), dtype=np.int64)
         return remove_region
@@ -68,10 +95,12 @@ def get_remove_region(entry, remove_objects, move_objects, preserve_objs, models
     for obj in preserve_objs:
         masks = run_sam(bbox=obj[1], image_source=image_source, models=models)
         preserve_mask = preserve_mask | masks
+        
     # Process the SAM mask by averaging, thresholding, and dilating.
     preserve_region = run_sam_postprocess(preserve_mask, H, W, config)
     remove_region = run_sam_postprocess(remove_mask, H, W, config)
     remove_region = np.logical_and(remove_region, np.logical_not(preserve_region))
+
     return remove_region
 
 
@@ -83,7 +112,7 @@ def get_repos_info(entry, move_objects, models, config):
     * Warning: For simplicity, the object is not positioned to the center of the new region...
     """
 
-    # if no remove objects, set zero to the whole mask
+    # If there are no objects to be moved, set zero to the whole mask
     if not move_objects:
         return move_objects
     image_source = np.array(Image.open(entry["output"][-1]))
@@ -186,17 +215,15 @@ def correction(entry, add_objects, move_objects, remove_region, change_attr_obje
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run SLD")
-    parser.add_argument("--json-file", type=str, default="data/data.json", help="Path to data.json")
+    # parser.add_argument("--json-file", type=str, default="data/data.json", help="Path to data.json")
+    parser.add_argument("--name", type=str, default="temp", help="Name of the image")
     parser.add_argument("--input-dir", type=str, default="data/input_dir", help="Path to the input directory")
     parser.add_argument("--output-dir", type=str, default="data/output_dir", help="Path to the output directory")
     parser.add_argument("--mode", type=str, default="self_correction", help="Mode of the demo", choices=["self_correction", "image_editing"])
-    parser.add_argument("--config", type=str, default="sld_config.ini", help="Path to the config file")
+    parser.add_argument("--config", type=str, default="config.ini", help="Path to the config file")
     args = parser.parse_args()
 
-    # Load the json file
-    with open(args.json_file) as f:
-        data = json.load(f)
-    save_dir = args.output_dir
+    save_dir = os.path.join(args.output_dir, args.name) # save_dir = data/output_dir/temp
     parse.img_dir = os.path.join(save_dir, "tmp_imgs") # parse.img_dir = data/output_dir/tmp_imgs
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(parse.img_dir, exist_ok=True)
@@ -222,113 +249,152 @@ if __name__ == "__main__":
 
     from models import image_generator
 
-    for idx in range(len(data)):
+    # Prepare the evaluator
+    evaluator = Evaluator()
+    prompts = get_lmd_prompts()["lmd"]
+
+    for idx, prompt in enumerate(prompts):
         # Reset random seeds
         default_seed = int(config.get("SLD", "default_seed"))
         torch.manual_seed(default_seed)
         np.random.seed(default_seed)
         random.seed(default_seed)
 
-        # Load the image and prompt
-        input_fname = data[idx]["input_fname"]
-        fname = os.path.join(args.input_dir, f"{input_fname}.png") # fname = data/input_dir/{input_fname}.png
-        prompt = data[idx]["prompt"]
-
         # Create an output directory for the current image
-        dirname = os.path.join(save_dir, data[idx]["output_dir"]) # dirname = data/output_dir/{output_dir}
-        os.makedirs(dirname, exist_ok=True)
-        output_fname = os.path.join(dirname, f"initial_image.png") # output_fname = data/output_dir/{output_dir}/initial_image.png
-        shutil.copy(fname, output_fname)
+        prompt = prompt.strip().rstrip(".")
+        dirname = os.path.join(save_dir, f"{idx:03d}")
+        fname = os.path.join(dirname, "initial_image.jpg") # output_fname = data/output_dir/{output_dir}/initial_image.png
+        log_file = os.path.join(dirname, "log.txt")
+        set_file_handler(log_file)
 
-        print("-" * 5 + f" [Self-Correcting {fname}] " + "-" * 5)
-        print(f"Target Textual Prompt: {prompt}")
+        # Check whether we need to do self-correction
+        attr_threshold = float(config.get("eval", "attr_detection_threshold")) 
+        prim_threshold = float(config.get("eval", "prim_detection_threshold"))
+        nms_threshold = float(config.get("eval", "nms_threshold"))
 
-        # Step 1: Spot Objects with LLM
-        print("-" * 5 + f" Parsing Prompts " + "-" * 5)
-        llm_parsed_prompt = spot_objects(prompt, data[idx], config)
-        entry = {"instructions": prompt, "output": [fname],
-                 "generator": data[idx]["generator"],
-                 "objects": llm_parsed_prompt["objects"], 
-                 "bg_prompt": llm_parsed_prompt["bg_prompt"],
-                 "neg_prompt": llm_parsed_prompt["neg_prompt"]
-                }
-        print(f"* Objects: {entry['objects']}")
-        print(f"* Background: {entry['bg_prompt']}")
-        print(f"* Negation: {entry['neg_prompt']}")
-
-        # Step 2: Run open vocabulary detector
-        print("-" * 5 + f" Running Detector " + "-" * 5)
-        default_attr_threshold = float(config.get("SLD", "attr_detection_threshold")) 
-        default_prim_threshold = float(config.get("SLD", "prim_detection_threshold"))
-        default_nms_threshold = float(config.get("SLD", "nms_threshold"))
-
-        attr_threshold = float(config.get(entry["generator"], "attr_detection_threshold", fallback=default_attr_threshold))
-        prim_threshold = float(config.get(entry["generator"], "prim_detection_threshold", fallback=default_prim_threshold))
-        nms_threshold = float(config.get(entry["generator"], "nms_threshold", fallback=default_nms_threshold))
-
-        det_results = det.run(prompt, entry["objects"], entry["output"][-1],
-                              attr_detection_threshold=attr_threshold, 
-                              prim_detection_threshold=prim_threshold, 
-                              nms_threshold=nms_threshold)
-        
-        # Step 3: Spot difference between detected results and initial prompts
-        print("-" * 5 + f" Getting Modification Suggestions " + "-" * 5)
-        llm_suggestions = spot_differences(prompt, det_results, data[idx], config, mode=args.mode)
-        entry["det_results"] = copy.deepcopy(det_results)
-        entry["llm_suggestions"] = copy.deepcopy(llm_suggestions)
-        print(f"* Detection Results: {det_results}")
-        print(f"* LLM Suggestions: {llm_suggestions}")
-
-        # Step 4: Check which objects to preserve, delete, add, reposition, or modify
-        print("-" * 5 + f" Editing Operations " + "-" * 5)
-        (
-            preserve_objs,
-            deletion_objs,
-            addition_objs,
-            repositioning_objs,
-            attr_modification_objs,
-        ) = det.parse_list(det_results, llm_suggestions)
-        print(f"* Preservation: {preserve_objs}")
-        print(f"* Addition: {addition_objs}")
-        print(f"* Deletion: {deletion_objs}")
-        print(f"* Repositioning: {repositioning_objs}")
-        print(f"* Attribute Modification: {attr_modification_objs}")
-
-        # Visualize the detection results
-        parse.show_boxes(
-            gen_boxes=entry["det_results"],
-            additional_boxes=entry["llm_suggestions"],
-            img=np.array(Image.open(entry["output"][-1])).astype(np.uint8),
-            fname=os.path.join(dirname, "det_result_obj.png"),
-        )
-
-        # Check if there are any operations to perform
-        total_ops = len(deletion_objs) + len(addition_objs) + len(repositioning_objs) + len(attr_modification_objs)
-        if total_ops == 0:
-            print("-" * 5 + f" Results " + "-" * 5)
-            output_fname = os.path.join(dirname, f"final_image.png") # output_fname = data/output_dir/{output_dir}/final_image.png
-            shutil.copy(entry["output"][-1], output_fname)
-            print(f"No operations needed. The final image is saved at {output_fname}")
+        # Step 0: Evaluate the initial image
+        eval_type, eval_success = eval_prompt(prompt, fname, evaluator, 
+                                              prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, 
+                                              nms_threshold=nms_threshold, use_class_aware_nms=True, use_cuda=True, verbose=False)
+        if int(eval_success) >= 1:
+            logging.info(f"Image {fname} is already correct!")
             continue
 
-        # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
-        print("-" * 5 + f" Image Manipulation " + "-" * 5)
+        chatgpt_data = {
+            'llm_parser': None,
+            'llm_controller': []
+        }
+        data = {}
+        data["prompt"] = prompt
 
-        deletion_region = get_remove_region(
-            entry, deletion_objs, repositioning_objs, [], models, config
-        )
-        print(f"* Deletion: {deletion_region}")
-        repositioning_objs = get_repos_info(
-            entry, repositioning_objs, models, config
-        )
-        print(f"* Repositioning: {repositioning_objs}")
-        attr_modification_objs = get_attrmod_latent(
-            entry, attr_modification_objs, models, config
-        )
-        print(f"* Attribute Modification: {attr_modification_objs}")
-        ret_dict = correction(
-            entry, addition_objs, repositioning_objs, deletion_region, attr_modification_objs, models, config
-        )
+        logging.info("-" * 5 + f" [Self-Correcting {fname}] " + "-" * 5)
+        logging.info(f"Target Textual Prompt: {prompt}")
 
-        print()
+        # Step 1: Spot Objects with LLM
+        logging.info("-" * 5 + f" Parsing Prompts " + "-" * 5)
+        llm_parsed_prompt, spot_object_raw_response = run_llm_parser(prompt, config)
+        entry = {"instructions": prompt, "output": [fname],
+                "objects": llm_parsed_prompt["objects"], 
+                "bg_prompt": llm_parsed_prompt["bg_prompt"],
+                "neg_prompt": llm_parsed_prompt["neg_prompt"]
+                }
+        logging.info(f"* Objects: {entry['objects']}")
+        logging.info(f"* Background: {entry['bg_prompt']}")
+        logging.info(f"* Negation: {entry['neg_prompt']}")
+        chatgpt_data["llm_parser"] = (prompt, spot_object_raw_response)
+
+        num_round = int(config.get("SLD", "num_rounds", fallback=1))
+        for i in range(num_round):
+            logging.info(f"Round {i + 1}")
+
+            # Step 2: Run open vocabulary detector
+            logging.info("-" * 5 + f" Running Detector " + "-" * 5)
+            attr_threshold = float(config.get("SLD", "attr_detection_threshold")) 
+            prim_threshold = float(config.get("SLD", "prim_detection_threshold"))
+            nms_threshold = float(config.get("SLD", "nms_threshold"))
+
+            det_results = det.run(prompt, entry["objects"], entry["output"][-1],
+                                attr_detection_threshold=attr_threshold, 
+                                prim_detection_threshold=prim_threshold, 
+                                nms_threshold=nms_threshold)
+            
+            # Step 3: Spot difference between detected results and initial prompts
+            logging.info("-" * 5 + f" Getting Modification Suggestions " + "-" * 5)
+            llm_suggestions, spot_difference_raw_response = run_llm_controller(prompt, det_results, config)
+            entry["det_results"] = copy.deepcopy(det_results)
+            entry["llm_suggestion"] = copy.deepcopy(llm_suggestions)
+            logging.info(f"* Detection Restuls: {det_results}")
+            logging.info(f"* LLM Suggestions: {llm_suggestions}")
+            chatgpt_data["llm_controller"].append((prompt, spot_difference_raw_response))
+
+            # Step 4: Check which objects to preserve, delete, add, reposition, or modify
+            logging.info("-" * 5 + f" Editing Operations " + "-" * 5)
+            (
+                preserve_objs,
+                deletion_objs,
+                addition_objs,
+                repositioning_objs,
+                attr_modification_objs,
+            ) = det.parse_list(det_results, llm_suggestions)
+            logging.info(f"* Preservation: {preserve_objs}")
+            logging.info(f"* Addition: {addition_objs}")
+            logging.info(f"* Deletion: {deletion_objs}")
+            logging.info(f"* Repositioning: {repositioning_objs}")
+            logging.info(f"* Attribute Modification: {attr_modification_objs}")
+
+            # Visualize the detection results
+            parse.show_boxes(
+                gen_boxes=entry["det_results"],
+                additional_boxes=entry["llm_suggestion"],
+                img=np.array(Image.open(entry["output"][-1])).astype(np.uint8),
+                fname=os.path.join(dirname, f"det_result{i+1}.jpg"),
+            )
+            
+            # Check if there are any changes to apply
+            total_ops = len(deletion_objs) + len(addition_objs) + len(repositioning_objs) + len(attr_modification_objs)
+            if (total_ops == 0):
+                logging.info("-" * 5 + f" Results " + "-" * 5)
+                output_fname = os.path.join(dirname, f"round{i+1}.jpg")
+                shutil.copy(entry["output"][-1], output_fname)
+                entry["output"].append(output_fname)
+                logging.info("* No changes to apply!")
+                logging.info(f"* Output File: {output_fname}")
+                continue
+
+            # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
+            logging.info("-" * 5 + f" Image Manipulation " + "-" * 5)
+
+            deletion_region = get_remove_region(
+                entry, deletion_objs, repositioning_objs, preserve_objs, models, config
+            )
+            repositioning_objs = get_repos_info(
+                entry, repositioning_objs, models, config
+            )
+            new_attr_modification_objs = get_attrmod_latent(
+                entry, attr_modification_objs, models, config
+            )
+            ret_dict = correction(
+                entry, addition_objs, repositioning_objs,
+                deletion_region, new_attr_modification_objs, 
+                models, config
+            )
+
+            # Step 6: Save an intermediate file without the SDXL refinement
+            logging.info("-" * 5 + f" Results " + "-" * 5)
+            curr_output_fname = os.path.join(dirname, f"round{i+1}.jpg")
+            Image.fromarray(ret_dict.image).save(curr_output_fname)
+            entry["output"].append(curr_output_fname)
+            logging.info(f"* Output File: {curr_output_fname}")
+            utils.free_memory()
+
+            # Evaluate again after self-correction!
+            eval_type, eval_success = eval_prompt(prompt, curr_output_fname, evaluator, 
+                                                prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, 
+                                                nms_threshold=nms_threshold, use_class_aware_nms=True, use_cuda=True, verbose=False)
+            if int(eval_success) >= 1:
+                logging.info(f"Image {fname} is already correct!")
+            else:
+                logging.info(f"Image {fname} is still incorrect!")
         
+        with open(os.path.join(dirname, "chatgpt_data.json"), 'w') as f:
+            json.dump(chatgpt_data, f)
