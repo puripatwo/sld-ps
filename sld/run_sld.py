@@ -274,8 +274,8 @@ if __name__ == "__main__":
 
         # Step 0: Evaluate the initial image
         eval_type, eval_success = eval_prompt(prompt, fname, evaluator, 
-                                              prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, 
-                                              nms_threshold=nms_threshold, use_class_aware_nms=True, use_cuda=True, verbose=False)
+                                              prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
+                                              use_class_aware_nms=True, use_cuda=True, verbose=False)
         if int(eval_success) >= 1:
             logging.info(f"Image {fname} is already correct!")
             continue
@@ -389,8 +389,8 @@ if __name__ == "__main__":
 
             # Evaluate again after self-correction!
             eval_type, eval_success = eval_prompt(prompt, curr_output_fname, evaluator, 
-                                                prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, 
-                                                nms_threshold=nms_threshold, use_class_aware_nms=True, use_cuda=True, verbose=False)
+                                                  prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
+                                                  use_class_aware_nms=True, use_cuda=True, verbose=False)
             if int(eval_success) >= 1:
                 logging.info(f"Image {fname} is already correct!")
             else:
