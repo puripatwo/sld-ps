@@ -44,7 +44,7 @@ class PromptSettings(BaseModel):
 def load_prompts_from_yaml(path, attributes = []):
     with open(path, "r") as f:
         prompts = yaml.safe_load(f)
-    print(prompts)
+    print(f"Old Prompts: {prompts}")
 
     if len(prompts) == 0:
         raise ValueError("prompts file is empty")
@@ -61,7 +61,7 @@ def load_prompts_from_yaml(path, attributes = []):
     else:
         new_prompts = copy.deepcopy(prompts)
 
-    print(new_prompts)
+    print(f"New Prompts: {prompts}")
     print(len(prompts), len(new_prompts))
     prompt_settings = [PromptSettings(**prompt) for prompt in new_prompts]
 

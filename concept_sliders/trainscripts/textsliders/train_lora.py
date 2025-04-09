@@ -28,6 +28,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     # Create a prompt dictionary (1)
     metadata = {
         "prompts": ",".join([prompt.json() for prompt in prompts]),
+        "config": config.json(),
     }
     save_path = Path(config.save.path)
     if config.logging.verbose:
@@ -353,7 +354,7 @@ def main(args):
     else:
         device = "cpu"
 
-    train(config, prompts, device)
+    # train(config, prompts, device)
 
 
 if __name__ == "__main__":

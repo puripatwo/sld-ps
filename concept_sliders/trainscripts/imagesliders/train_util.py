@@ -135,6 +135,7 @@ def get_random_resolution_in_bucket(bucket_resolution: int = 512) -> tuple[int, 
 
     return height, width
 
+
 @torch.no_grad()
 def get_noisy_image(
     img,

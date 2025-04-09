@@ -29,29 +29,29 @@ def flush():
 
 
 def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder_main: str, folders, scales):
-    scales = np.array(scales)
     folders = np.array(folders)
+    scales = np.array(scales)
     scales_unique = list(scales)
 
-    # Create a prompt dictionary
+    # Create a prompt dictionary (1)
     metadata = {
         "prompts": ",".join([prompt.json() for prompt in prompts]),
         "config": config.json(),
     }
     save_path = Path(config.save.path)
-
-    modules = DEFAULT_TARGET_REPLACE
-    if config.network.type == "c3lier":
-        modules += UNET_TARGET_REPLACE_MODULE_CONV
-
     if config.logging.verbose:
         print(metadata)
+
+    # Set the network type (2)
+    modules = DEFAULT_TARGET_REPLACE # ["Attention"]
+    if config.network.type == "c3lier":
+        modules += UNET_TARGET_REPLACE_MODULE_CONV
     
-    # Initialize wandb
+    # Initialize wandb (3)
     if config.logging.use_wandb:
         wandb.init(project=f"LECO_{config.save.name}", config=metadata)
     
-    # Set the precision
+    # Set the precision (4)
     weight_dtype = config_util.parse_precision(config.train.precision)
     save_weight_dtype = config_util.parse_precision(config.train.precision)
 
@@ -71,6 +71,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
     unet.requires_grad_(False)
     unet.eval() # Freezes UNet
 
+    ### LoRA ###
     # 2. Set up LoRA.
     network = LoRANetwork(
         unet,
@@ -165,28 +166,28 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             
             timesteps_to = torch.randint(1, config.train.max_denoising_steps - 1, (1,)).item()  # 1, 25, (1,)
 
-            # 6.2. Set up dynamic resolution.
-            height, width = (prompt_pair.resolution, prompt_pair.resolution)
-            if prompt_pair.dynamic_resolution:
-                height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
+            # # 6.2. Set up dynamic resolution.
+            # height, width = (prompt_pair.resolution, prompt_pair.resolution)
+            # if prompt_pair.dynamic_resolution:
+            #     height, width = train_util.get_random_resolution_in_bucket(prompt_pair.resolution)
             
-            if config.logging.verbose:
-                print("guidance_scale:", prompt_pair.guidance_scale)
-                print("resolution:", prompt_pair.resolution)
-                print("dynamic_resolution:", prompt_pair.dynamic_resolution)
-                if prompt_pair.dynamic_resolution:
-                    print("bucketed resolution:", (height, width))
-                print("batch_size:", prompt_pair.batch_size)
+            # if config.logging.verbose:
+            #     print("guidance_scale:", prompt_pair.guidance_scale)
+            #     print("resolution:", prompt_pair.resolution)
+            #     print("dynamic_resolution:", prompt_pair.dynamic_resolution)
+            #     if prompt_pair.dynamic_resolution:
+            #         print("bucketed resolution:", (height, width))
+            #     print("batch_size:", prompt_pair.batch_size)
             
             # 6.3. Select an image pair from folders.
-            scale_to_look = abs(random.choice(list(scales_unique)))
+            scale_to_look = abs(random.choice(scales_unique))
             folder1 = folders[scales==-scale_to_look][0]  # folder1 = 'smallsize'
             folder2 = folders[scales==scale_to_look][0]  # folder2 = 'bigsize'
 
             ims = os.listdir(f'{folder_main}/{folder1}/')  # datasets/eyesize/smallsize/
             ims = [im_ for im_ in ims if '.png' in im_ or '.jpg' in im_ or '.jpeg' in im_ or '.webp' in im_]
 
-            # 6.3. Retrieve the input images.
+            # 6.4. Retrieve the input images.
             random_sampler = random.randint(0, len(ims)-1)
             img1 = Image.open(f'{folder_main}/{folder1}/{ims[random_sampler]}').resize((256,256))
             img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
@@ -194,7 +195,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             seed = random.randint(0, 2 * 15)
             generator = torch.manual_seed(seed)
 
-            # 6.4. Encode images into latents and add noise.
+            # 6.5. Encode images into latents and add noise.
             denoised_latents_low, low_noise = train_util.get_noisy_image(
                 img1,
                 vae,
@@ -218,7 +219,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             denoised_latents_high = denoised_latents_high.to(device, dtype=weight_dtype)
             high_noise = high_noise.to(device, dtype=weight_dtype)
 
-            # 6.5. Set to be in the same proportions as max_denoising_steps.
+            # 6.6. Set to be in the same proportions as max_denoising_steps.
             noise_scheduler.set_timesteps(1000)
             current_timestep = noise_scheduler.timesteps[
                 int(timesteps_to * 1000 / config.train.max_denoising_steps)
@@ -256,7 +257,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 print("high_latents:", high_latents[0, 0, :5, :5])
                 print("low_latents:", low_latents[0, 0, :5, :5])
 
-        # 6.6. Train with positive scale.
+        # 6.7. Train with positive scale.
         network.set_lora_slider(scale=scale_to_look)
         with network:
             # Predicting noise of target latents (high)
@@ -273,6 +274,9 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 guidance_scale=1,
             ).to("cpu", dtype=torch.float32)
 
+            if config.logging.verbose:
+                print("target_latents_high:", target_latents_high[0, 0, :5, :5])
+
         high_latents.requires_grad = False
         low_latents.requires_grad = False
 
@@ -280,7 +284,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
         loss_high.backward()
 
-        # 6.7. Train with negative scale.
+        # 6.8. Train with negative scale.
         network.set_lora_slider(scale=-scale_to_look)
         with network:
             # Predicting noise of target latents (low)
@@ -296,6 +300,9 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 ),
                 guidance_scale=1,
             ).to("cpu", dtype=torch.float32)
+
+            if config.logging.verbose:
+                print("target_latents_low:", target_latents_low[0, 0, :5, :5])
             
         high_latents.requires_grad = False
         low_latents.requires_grad = False
@@ -315,7 +322,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         )
         flush()
 
-        # 6.8. Saves model checkpoints periodically.
+        # 6.9. Saves model checkpoints periodically.
         if (i % config.save.per_steps == 0 and i != 0 and i != config.train.iterations - 1):
             print("Saving...")
             save_path.mkdir(parents=True, exist_ok=True)
