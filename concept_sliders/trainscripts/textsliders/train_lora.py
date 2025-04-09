@@ -342,8 +342,8 @@ def main(args):
 
     config.save.name += f'_alpha{config.network.alpha}'
     config.save.name += f'_rank{config.network.rank}'
-    config.save.name += f'_{config.network.training_method}'
-    config.save.path += f'/{config.save.name}'
+    config.save.name += f'_{config.network.training_method}'  # eyeslider_alpha1.0_rank4_noxattn
+    config.save.path += f'/{config.save.name}'  # ./models/eyeslider_alpha1.0_rank4_noxattn
 
     prompts = prompt_util.load_prompts_from_yaml(config.prompts_file, attributes)
     print(prompts)

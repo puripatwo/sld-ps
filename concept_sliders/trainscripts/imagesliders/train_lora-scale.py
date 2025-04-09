@@ -355,11 +355,15 @@ def main(args):
     if args.attributes is not None:
         attributes = args.attributes.split(',')
         attributes = [a.strip() for a in attributes]
+    if args.prompts_file is not None:
+        config.prompts_file = args.prompts_file
+    if args.alpha is not None:
+        config.network.alpha = args.alpha
+    if args.rank is not None:
+        config.network.rank = args.rank
     
-    config.network.alpha = args.alpha
-    config.network.rank = args.rank
-    config.save.name += f'_alpha{args.alpha}'
-    config.save.name += f'_rank{config.network.rank }'
+    config.save.name += f'_alpha{config.network.alpha}'
+    config.save.name += f'_rank{config.network.rank}'
     config.save.name += f'_{config.network.training_method}'  # eyeslider_alpha1.0_rank4_noxattn
     config.save.path += f'/{config.save.name}'  # ./models/eyeslider_alpha1.0_rank4_noxattn
 
@@ -385,11 +389,12 @@ def main(args):
         check = args.style_check.split('-')
         for i in range(int(check[0]), int(check[1])):
             folder_main = args.folder_main + f'{i}'  # datasets/eyesize/{i}
-            config.save.name = f'{os.path.basename(folder_main)}'
+            config.save.name = f'{os.path.basename(folder_main)}'  # {i}
             config.save.name += f'_alpha{args.alpha}'
-            config.save.name += f'_rank{config.network.rank }'  # {i}_alpha1.0_rank4
-            config.save.path = f'models/{config.save.name}'  # models/{i}_alpha1.0_rank4
-            train(config=config, prompts=prompts, device=device, folder_main=folder_main)
+            config.save.name += f'_rank{config.network.rank }'
+            config.save.name += f'_{config.network.training_method}'  # {i}_alpha1.0_rank4_noxattn
+            config.save.path = f'models/{config.save.name}'  # models/{i}_alpha1.0_rank4_noxattn
+            train(config=config, prompts=prompts, device=device, folder_main=folder_main, folders=folders, scales=scales)
     else:
         train(config=config, prompts=prompts, device=device, folder_main=args.folder_main, folders=folders, scales=scales)
 
