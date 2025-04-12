@@ -451,7 +451,7 @@ if __name__ == "__main__":
     if 'rank8' in model_name:
         rank = 8
     if 'alpha1' in model_name:
-        alpha = 1.0
+        alpha = 1
 
     if 'full' in model_name:
         train_method = 'full'
