@@ -274,8 +274,16 @@ if __name__ == "__main__":
 
     # 1
     weight_dtype = torch.float32
-    device = torch.device("cuda")
+    scales = [0, 1, 2, 3]
+    for scale in scales:
+        os.makedirs(os.path.join(save_path, os.path.basename(model_name), str(scale)), exist_ok=True)
 
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:0")
+    else:
+        device = "cpu"
+
+    # 2
     scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
     ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", scheduler=scheduler, torch_dtype=weight_dtype).to(device)
     try:
@@ -284,7 +292,7 @@ if __name__ == "__main__":
         print("Attribute disable_xformers_memory_efficient_attention() is missing")
     tokenizer = ldm_stable.tokenizer
 
-    # 2
+    # 3
     null_inversion = NullInversion(ldm_stable)
     (image_gt, image_enc), x_t, uncond_embeddings = null_inversion.invert(image_path, image_prompt, offsets=(0, 0, 0, 0), verbose=True)
     Image.fromarray(image_enc)
@@ -292,7 +300,7 @@ if __name__ == "__main__":
     del ldm_stable
     flush()
 
-    # 3
+    # 4
     revision = None
     pretrained_model_name_or_path = "CompVis/stable-diffusion-v1-4"
     noise_scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
@@ -310,7 +318,6 @@ if __name__ == "__main__":
     unet.requires_grad_(False)
     unet.to(device, dtype=weight_dtype)
 
-    # 4
     rank = 4
     alpha = 1
     if 'full' in model_name:
@@ -341,7 +348,6 @@ if __name__ == "__main__":
         ).to(device, dtype=weight_dtype)
     network.load_state_dict(torch.load(lora_weight))
 
-    # 6
     width = 512
     height = 512
     ddim_steps = 50
@@ -350,23 +356,19 @@ if __name__ == "__main__":
     batch_size = 1
     start_noise = 500
 
-    scales = [0, 1, 2, 3]
+    # 6
     for scale in scales:
-        os.makedirs(os.path.join(save_path, os.path.basename(lora_weight), str(scale)), exist_ok=True)
-
-    # 7
-    for scale in scales:
-        # 7.1. Tokenize the prompt.
+        # 6.1. Tokenize the prompt.
         text_input = tokenizer(image_prompt, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
         text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
         max_length = text_input.input_ids.shape[-1]
 
-        # 7.2. Prepare timesteps and latent variables.
+        # 6.2. Prepare timesteps and latent variables.
         noise_scheduler.set_timesteps(ddim_steps)
         latents = x_t * noise_scheduler.init_noise_sigma
         latents = latents.to(unet.dtype)
 
-        # 7.3. Denoising loop.
+        # 6.3. Denoising loop.
         cnt = -1
         for t in tqdm(noise_scheduler.timesteps):
             cnt += 1
@@ -397,18 +399,18 @@ if __name__ == "__main__":
             # Compute the previous noisy sample x_t -> x_t-1
             latents = noise_scheduler.step(noise_pred, t, latents).prev_sample
 
-        # 7.4. Scale and decode the image latents with vae.
+        # 6.4. Scale and decode the image latents with vae.
         latents = 1 / 0.18215 * latents
         with torch.no_grad():
             image = vae.decode(latents).sample
         
-        # 7.5. Image post-processing.
+        # 6.5. Image post-processing.
         image = (image / 2 + 0.5).clamp(0, 1)
         image = image.detach().cpu().permute(0, 2, 3, 1).to(torch.float16).numpy()
         images = (image * 255).round().astype("uint8")
         pil_images = [Image.fromarray(image) for image in images]
 
-        # 8
+        # 6.6. Loop through each generated image and store them.
         for idx, im in enumerate(pil_images):
             image_filename = f"image_{idx}"
             im.save(os.path.join(os.path.join(save_path, os.path.basename(lora_weight), str(scale)), image_filename))
