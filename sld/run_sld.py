@@ -42,6 +42,16 @@ console_handler.setFormatter(formatter)
 logging.getLogger().addHandler(console_handler)
 
 
+def generate_image(model_key, prompt, seed):
+    from diffusers import StableDiffusionPipeline
+
+    pipe = StableDiffusionPipeline.from_pretrained(model_key, torch_dtype=torch.float16)
+    pipe = pipe.to("cuda")
+
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    return pipe(prompt, generator=generator).images[0]
+
+
 def run_llm_parser(prompt, config):
     questions = f"User Prompt: {prompt}\nReasoning:\n"
     message = spot_object_template + questions
@@ -132,58 +142,142 @@ def get_repos_info(entry, move_objects, models, config):
     return new_move_objects
 
 
+# # Operation #4: Attribute Modification (Preprocessing latent)
+# def get_attrmod_latent(entry, change_attr_objects, models, config):
+#     if len(change_attr_objects) == 0:
+#         return []
+    
+#     from diffusers import StableDiffusionDiffEditPipeline
+#     from diffusers import DDIMScheduler, DDIMInverseScheduler
+
+#     img = Image.open(entry["output"][-1])
+#     image_source = np.array(img)
+#     H, W, _ = image_source.shape
+#     inv_seed = int(config.get("SLD", "inv_seed"))
+
+#     # Initialize the Stable Diffusion pipeline
+#     pipe = StableDiffusionDiffEditPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-base", torch_dtype=torch.float16).to("cuda")
+#     pipe.inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+#     pipe.enable_model_cpu_offload()
+
+#     new_change_objects = []
+#     for obj in change_attr_objects:
+#         # Run diffedit
+#         old_object_region = run_sam_postprocess(run_sam(obj[1], image_source, models), H, W, config)
+#         old_object_region = old_object_region.astype(np.bool_)[np.newaxis, ...]
+
+#         new_object = obj[0].split(" #")[0]
+#         base_object = new_object.split(" ")[-1]
+#         mask_prompt = f"a {base_object}"
+#         new_prompt = f"a {new_object}"
+
+#         image_latents = pipe.invert(
+#             image=img,
+#             prompt=mask_prompt,
+#             inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+#             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+#         ).latents
+#         image = pipe(
+#             prompt=new_prompt,
+#             mask_image=old_object_region,
+#             image_latents=image_latents,
+#             guidance_scale=float(config.get("SLD", "diffedit_guidance_scale")),
+#             inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+#             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+#             negative_prompt="",
+#         ).images[0]
+
+#         all_latents, _ = get_all_latents(np.array(image), models, inv_seed)
+#         new_change_objects.append(
+#             [
+#                 old_object_region[0],
+#                 all_latents,
+#             ]
+#         )
+#     return new_change_objects
+
+
 # Operation #4: Attribute Modification (Preprocessing latent)
 def get_attrmod_latent(entry, change_attr_objects, models, config):
     if len(change_attr_objects) == 0:
         return []
-    
+
     from diffusers import StableDiffusionDiffEditPipeline
     from diffusers import DDIMScheduler, DDIMInverseScheduler
 
-    img = Image.open(entry["output"][-1])
+    image_path = entry["output"][-1]
+    img = Image.open(image_path).convert("RGB")
     image_source = np.array(img)
     H, W, _ = image_source.shape
     inv_seed = int(config.get("SLD", "inv_seed"))
+    inpaint_strength = float(config.get("SLD", "diffedit_inpaint_strength"))
+    guidance_scale = float(config.get("SLD", "diffedit_guidance_scale"))
+    num_inference_steps = int(config.get("SLD", "num_inference_steps", fallback="41"))
 
-    # Initialize the Stable Diffusion pipeline
-    pipe = StableDiffusionDiffEditPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-base", torch_dtype=torch.float16).to("cuda")
-    pipe.inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+    # Initialize the pipeline and replace both schedulers
+    pipe = StableDiffusionDiffEditPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-2-1-base",
+        torch_dtype=torch.float16
+    ).to("cuda")
+
+    # Use custom schedulers and explicitly set timesteps
+    scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+
+    scheduler.set_timesteps(num_inference_steps)
+    inverse_scheduler.set_timesteps(num_inference_steps)
+
+    pipe.scheduler = scheduler
+    pipe.inverse_scheduler = inverse_scheduler
+
     pipe.enable_model_cpu_offload()
 
+    print("DEBUG: Scheduler timesteps:", len(pipe.scheduler.timesteps))
+    print("DEBUG: Inverse scheduler timesteps:", len(pipe.inverse_scheduler.timesteps))
+
     new_change_objects = []
+
     for obj in change_attr_objects:
-        # Run diffedit
-        old_object_region = run_sam_postprocess(run_sam(obj[1], image_source, models), H, W, config)
-        old_object_region = old_object_region.astype(np.bool_)[np.newaxis, ...]
+        old_object_region = run_sam_postprocess(
+            run_sam(obj[1], image_source, models),
+            H, W, config
+        ).astype(np.bool_)[np.newaxis, ...]
 
         new_object = obj[0].split(" #")[0]
         base_object = new_object.split(" ")[-1]
         mask_prompt = f"a {base_object}"
         new_prompt = f"a {new_object}"
 
-        image_latents = pipe.invert(
+        # Explicit inversion step
+        inversion_result = pipe.invert(
             image=img,
             prompt=mask_prompt,
-            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            inpaint_strength=inpaint_strength,
             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
-        ).latents
+            num_inference_steps=num_inference_steps,
+        )
+
+        image_latents = inversion_result.latents
+        print("DEBUG: Latents shape from inversion:", image_latents.shape)  # Should match scheduler steps
+
+        # Forward generation using inverted latents
         image = pipe(
             prompt=new_prompt,
             mask_image=old_object_region,
             image_latents=image_latents,
-            guidance_scale=float(config.get("SLD", "diffedit_guidance_scale")),
-            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            guidance_scale=guidance_scale,
+            inpaint_strength=inpaint_strength,
             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
             negative_prompt="",
+            num_inference_steps=num_inference_steps,
         ).images[0]
 
         all_latents, _ = get_all_latents(np.array(image), models, inv_seed)
-        new_change_objects.append(
-            [
-                old_object_region[0],
-                all_latents,
-            ]
-        )
+        new_change_objects.append([
+            old_object_region[0],
+            all_latents,
+        ])
+
     return new_change_objects
 
 
@@ -221,11 +315,21 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="data/output_dir", help="Path to the output directory")
     parser.add_argument("--mode", type=str, default="self_correction", help="Mode of the demo", choices=["self_correction", "image_editing"])
     parser.add_argument("--config", type=str, default="config.ini", help="Path to the config file")
+    parser.add_argument("--benchmark", type=bool, default=False, help="Perform the benchmark")
+    parser.add_argument("--model_key", type=str, default="CompVis/stable-diffusion-v1-4", help="Model key for initial image generation")
+    parser.add_argument("--prompt", type=str, required=True, help="Prompt for initial image generation")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for initial image generation")
     args = parser.parse_args()
 
+    # Generate the initial image
+    image = generate_image(args.model_key, args.prompt, args.seed)
+    input_fname = args.name
+    fname = os.path.join(args.input_dir, f"{input_fname}.png") # fname = data/input_dir/temp.png
+    image.save(fname)
+
     save_dir = os.path.join(args.output_dir, args.name) # save_dir = data/output_dir/temp
-    parse.img_dir = os.path.join(save_dir, "tmp_imgs") # parse.img_dir = data/output_dir/tmp_imgs
     os.makedirs(save_dir, exist_ok=True)
+    parse.img_dir = os.path.join(save_dir, "tmp_imgs") # parse.img_dir = data/output_dir/temp/tmp_imgs
     os.makedirs(parse.img_dir, exist_ok=True)
 
     # Load the config file
@@ -251,7 +355,9 @@ if __name__ == "__main__":
 
     # Prepare the evaluator
     evaluator = Evaluator()
-    prompts = get_lmd_prompts()["lmd"]
+    prompts = [args.prompt]
+    if args.benchmark:
+        prompts = get_lmd_prompts()["lmd"]
 
     for idx, prompt in enumerate(prompts):
         # Reset random seeds
@@ -261,9 +367,12 @@ if __name__ == "__main__":
         random.seed(default_seed)
 
         # Create an output directory for the current image
-        prompt = prompt.strip().rstrip(".")
-        dirname = os.path.join(save_dir, f"{idx:03d}")
-        fname = os.path.join(dirname, "initial_image.jpg") # output_fname = data/output_dir/{output_dir}/initial_image.png
+        dirname = save_dir # dirname = data/output_dir/temp
+        if args.benchmark:
+            dirname = os.path.join(save_dir, f"{idx:03d}") # dirname = data/output_dir/temp/{idx}
+            os.makedirs(dirname, exist_ok=True)
+        output_fname = os.path.join(dirname, "initial_image.jpg") # output_fname = data/output_dir/temp/{idx}/initial_image.png
+        shutil.copy(fname, output_fname)
         log_file = os.path.join(dirname, "log.txt")
         set_file_handler(log_file)
 
@@ -273,6 +382,7 @@ if __name__ == "__main__":
         nms_threshold = float(config.get("eval", "nms_threshold"))
 
         # Step 0: Evaluate the initial image
+        prompt = prompt.strip().rstrip(".")
         eval_type, eval_success = eval_prompt(prompt, fname, evaluator, 
                                               prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
                                               use_class_aware_nms=True, use_cuda=True, verbose=False)
@@ -284,8 +394,6 @@ if __name__ == "__main__":
             'llm_parser': None,
             'llm_controller': []
         }
-        data = {}
-        data["prompt"] = prompt
 
         logging.info("-" * 5 + f" [Self-Correcting {fname}] " + "-" * 5)
         logging.info(f"Target Textual Prompt: {prompt}")
@@ -293,7 +401,8 @@ if __name__ == "__main__":
         # Step 1: Spot Objects with LLM
         logging.info("-" * 5 + f" Parsing Prompts " + "-" * 5)
         llm_parsed_prompt, spot_object_raw_response = run_llm_parser(prompt, config)
-        entry = {"instructions": prompt, "output": [fname],
+        entry = {"instructions": prompt, 
+                 "output": [fname],
                 "objects": llm_parsed_prompt["objects"], 
                 "bg_prompt": llm_parsed_prompt["bg_prompt"],
                 "neg_prompt": llm_parsed_prompt["neg_prompt"]
@@ -354,11 +463,11 @@ if __name__ == "__main__":
             total_ops = len(deletion_objs) + len(addition_objs) + len(repositioning_objs) + len(attr_modification_objs)
             if (total_ops == 0):
                 logging.info("-" * 5 + f" Results " + "-" * 5)
-                output_fname = os.path.join(dirname, f"round{i+1}.jpg")
-                shutil.copy(entry["output"][-1], output_fname)
-                entry["output"].append(output_fname)
+                final_output_fname = os.path.join(dirname, f"round{i+1}.jpg")
+                shutil.copy(entry["output"][-1], final_output_fname)
+                entry["output"].append(final_output_fname)
                 logging.info("* No changes to apply!")
-                logging.info(f"* Output File: {output_fname}")
+                logging.info(f"* Output File: {final_output_fname}")
                 continue
 
             # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
@@ -381,14 +490,14 @@ if __name__ == "__main__":
 
             # Step 6: Save an intermediate file without the SDXL refinement
             logging.info("-" * 5 + f" Results " + "-" * 5)
-            curr_output_fname = os.path.join(dirname, f"round{i+1}.jpg")
-            Image.fromarray(ret_dict.image).save(curr_output_fname)
-            entry["output"].append(curr_output_fname)
-            logging.info(f"* Output File: {curr_output_fname}")
+            intermediate_output_fname = os.path.join(dirname, f"round{i+1}.jpg")
+            Image.fromarray(ret_dict.image).save(intermediate_output_fname)
+            entry["output"].append(intermediate_output_fname)
+            logging.info(f"* Output File: {intermediate_output_fname}")
             utils.free_memory()
 
             # Evaluate again after self-correction!
-            eval_type, eval_success = eval_prompt(prompt, curr_output_fname, evaluator, 
+            eval_type, eval_success = eval_prompt(prompt, intermediate_output_fname, evaluator, 
                                                   prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
                                                   use_class_aware_nms=True, use_cuda=True, verbose=False)
             if int(eval_success) >= 1:

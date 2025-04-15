@@ -69,7 +69,7 @@ def get_prompt_predicates_attribution(num_prompts=100, repeat=1):
     for i in range(num_prompts):
         np.random.seed(i)
         modifier1, modifier2 = np.random.choice(modifiers, 2, replace=False)
-        object1, object2 = np.random.choice(evaluate_classes_np, 2, replace=False)
+        object_name1, object_name2 = np.random.choice(evaluate_classes_np, 2, replace=False)
 
         object_name1, query_names1 = process_object_name(object_name1)
         object_name2, query_names2 = process_object_name(object_name2)

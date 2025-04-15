@@ -282,9 +282,7 @@ if __name__ == "__main__":
     with open(args.json_file) as f:
         data = json.load(f)
     save_dir = args.output_dir
-    parse.img_dir = os.path.join(save_dir, "tmp_imgs") # parse.img_dir = data/output_dir/tmp_imgs
     os.makedirs(save_dir, exist_ok=True)
-    os.makedirs(parse.img_dir, exist_ok=True)
 
     # Load the config file
     config = configparser.ConfigParser()
@@ -322,6 +320,8 @@ if __name__ == "__main__":
         # Create an output directory for the current image
         dirname = os.path.join(save_dir, data[idx]["output_dir"]) # dirname = data/output_dir/{output_dir}
         os.makedirs(dirname, exist_ok=True)
+        parse.img_dir = os.path.join(dirname, "tmp_imgs") # parse.img_dir = data/output_dir/{output_dir}/tmp_imgs
+        os.makedirs(parse.img_dir, exist_ok=True)
         output_fname = os.path.join(dirname, f"initial_image.png") # output_fname = data/output_dir/{output_dir}/initial_image.png
         shutil.copy(fname, output_fname)
 
@@ -331,7 +331,8 @@ if __name__ == "__main__":
         # Step 1: Spot Objects with LLM
         print("-" * 5 + f" Parsing Prompts " + "-" * 5)
         llm_parsed_prompt = spot_objects(prompt, data[idx], config)
-        entry = {"instructions": prompt, "output": [fname],
+        entry = {"instructions": prompt,
+                 "output": [fname],
                  "generator": data[idx]["generator"],
                  "objects": llm_parsed_prompt["objects"], 
                  "bg_prompt": llm_parsed_prompt["bg_prompt"],
@@ -391,10 +392,10 @@ if __name__ == "__main__":
         total_ops = len(deletion_objs) + len(addition_objs) + len(repositioning_objs) + len(attr_modification_objs)
         if total_ops == 0:
             print("-" * 5 + f" Results " + "-" * 5)
-            output_fname = os.path.join(dirname, f"final_{input_fname}.png") # output_fname = data/output_dir/{output_dir}/final_image.png
-            shutil.copy(entry["output"][-1], output_fname)
+            final_output_fname = os.path.join(dirname, f"final_{input_fname}.png") # output_fname = data/output_dir/{output_dir}/final_image.png
+            shutil.copy(entry["output"][-1], final_output_fname)
             print("* No changes to apply!")
-            print(f"* Output File: {output_fname}")
+            print(f"* Output File: {final_output_fname}")
             continue
 
         # Step 5: T2I Ops: Addition / Deletion / Repositioning / Attr. Modification
@@ -418,9 +419,9 @@ if __name__ == "__main__":
 
         # Step 6: Save an intermediate file without the SDXL refinement
         print("-" * 5 + f" Results " + "-" * 5)
-        curr_output_fname = os.path.join(dirname, f"intermediate_{input_fname}.png")
-        Image.fromarray(ret_dict.image).save(curr_output_fname)
-        print("* Output File (Before SDXL): ", curr_output_fname)
+        intermediate_output_fname = os.path.join(dirname, f"intermediate_{input_fname}.png")
+        Image.fromarray(ret_dict.image).save(intermediate_output_fname)
+        print("* Output File (Before SDXL): ", intermediate_output_fname)
         utils.free_memory()
 
         print()
