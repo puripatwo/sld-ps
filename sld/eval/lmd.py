@@ -198,7 +198,7 @@ def get_eval_info_from_prompt_lmd(prompt):
 def get_lmd_prompts():
     prompt_predicates_negation = get_prompt_predicates_negation(repeat=10)
     prompt_predicates_numeracy = get_prompt_predicates_numeracy(max_num=5, repeat=2)
-    prompt_predicates_attribution = get_prompt_predicates_attribution(num_prompts=100)
+    prompt_predicates_attribution = get_prompt_predicates_attribution(num_prompts=10)
     prompt_predicates_spatial = get_prompt_predicates_spatial(num_prompts=25)
 
     prompts_negation = [prompt for prompt, _ in prompt_predicates_negation]

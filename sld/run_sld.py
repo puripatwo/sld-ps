@@ -42,14 +42,20 @@ console_handler.setFormatter(formatter)
 logging.getLogger().addHandler(console_handler)
 
 
-def generate_image(model_key, prompt, seed):
+def generate_image(model_key, prompt, seed, target_size=(512, 512)):
     from diffusers import StableDiffusionPipeline
 
     pipe = StableDiffusionPipeline.from_pretrained(model_key, torch_dtype=torch.float16)
     pipe = pipe.to("cuda")
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    return pipe(prompt, generator=generator).images[0]
+    image = pipe(prompt, generator=generator).images[0]
+
+    # Resize image to 512x512 if needed
+    if image.size != target_size:
+        image = image.resize(target_size, Image.LANCZOS)
+
+    return image
 
 
 def run_llm_parser(prompt, config):
@@ -314,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument("--input-dir", type=str, default="data/input_dir", help="Path to the input directory")
     parser.add_argument("--output-dir", type=str, default="data/output_dir", help="Path to the output directory")
     parser.add_argument("--mode", type=str, default="self_correction", help="Mode of the demo", choices=["self_correction", "image_editing"])
-    parser.add_argument("--config", type=str, default="config.ini", help="Path to the config file")
+    parser.add_argument("--config", type=str, default="personal_config.ini", help="Path to the config file")
     parser.add_argument("--benchmark", type=bool, default=False, help="Perform the benchmark")
     parser.add_argument("--model_key", type=str, default="CompVis/stable-diffusion-v1-4", help="Model key for initial image generation")
     parser.add_argument("--prompt", type=str, required=True, help="Prompt for initial image generation")
@@ -383,12 +389,13 @@ if __name__ == "__main__":
 
         # Step 0: Evaluate the initial image
         prompt = prompt.strip().rstrip(".")
-        eval_type, eval_success = eval_prompt(prompt, fname, evaluator, 
-                                              prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
-                                              use_class_aware_nms=True, use_cuda=True, verbose=False)
-        if int(eval_success) >= 1:
-            logging.info(f"Image {fname} is already correct!")
-            continue
+        if args.benchmark:
+            eval_type, eval_success = eval_prompt(prompt, fname, evaluator, 
+                                                prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
+                                                use_class_aware_nms=True, use_cuda=True, verbose=False)
+            if int(eval_success) >= 1:
+                logging.info(f"Image {fname} is already correct!")
+                continue
 
         chatgpt_data = {
             'llm_parser': None,
@@ -497,13 +504,14 @@ if __name__ == "__main__":
             utils.free_memory()
 
             # Evaluate again after self-correction!
-            eval_type, eval_success = eval_prompt(prompt, intermediate_output_fname, evaluator, 
-                                                  prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
-                                                  use_class_aware_nms=True, use_cuda=True, verbose=False)
-            if int(eval_success) >= 1:
-                logging.info(f"Image {fname} is already correct!")
-            else:
-                logging.info(f"Image {fname} is still incorrect!")
+            if args.benchmark:
+                eval_type, eval_success = eval_prompt(prompt, intermediate_output_fname, evaluator, 
+                                                    prim_score_threshold=prim_threshold, attr_score_threshold=attr_threshold, nms_threshold=nms_threshold, 
+                                                    use_class_aware_nms=True, use_cuda=True, verbose=False)
+                if int(eval_success) >= 1:
+                    logging.info(f"Image {fname} is already correct!")
+                else:
+                    logging.info(f"Image {fname} is still incorrect!")
         
         with open(os.path.join(dirname, "chatgpt_data.json"), 'w') as f:
             json.dump(chatgpt_data, f)
