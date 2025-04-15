@@ -49,7 +49,7 @@
     {   
         "input_fname": "lmdplus_motor",
         "output_dir": "lmdplus_motor",
-        "prompt": "A realistic photo with a monkey sitting above a green motorcycle on the left and another raccoon sittig above a blue motorcycle on the right",
+        "prompt": "A realistic photo with a monkey sitting above a green motorcycle on the left and another raccoon sitting above a blue motorcycle on the right",
         "generator": "lmdplus",
         "llm_parsed_prompt": {
             "objects": [

@@ -2,10 +2,10 @@ import numpy as np
 import torch
 from easydict import EasyDict
 
+import models
 from . import pipelines
 from . import sam
-from . import models
-from .models import model_dict
+from . import model_dict
 from .pipelines import DEFAULT_OVERALL_NEGATIVE_PROMPT, DEFAULT_SO_NEGATIVE_PROMPT 
 
 import utils

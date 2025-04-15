@@ -18,7 +18,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from diffusers.utils import deprecate, logging, maybe_allow_in_graph
+# from diffusers.utils import deprecate, logging, maybe_allow_in_graph
+from diffusers.utils import deprecate, logging
+from diffusers.utils.torch_utils import maybe_allow_in_graph
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

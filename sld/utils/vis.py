@@ -6,6 +6,13 @@ from PIL import Image, ImageDraw
 import utils
 from . import parse
 
+save_ind = 0
+
+
+def reset_save_ind():
+    global save_ind
+    save_ind = 0
+
 
 # image_generator.py
 def display(image, save_prefix="", ind=None, save_ind_in_filename=True):

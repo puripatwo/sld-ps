@@ -349,3 +349,24 @@ def shift_tensor(
         ]
 
     return new_tensor
+
+
+def draw_box(pil_img, bboxes, phrases):
+    draw = ImageDraw.Draw(pil_img)
+    # font = ImageFont.truetype('./FreeMono.ttf', 25)
+
+    for obj_bbox, phrase in zip(bboxes, phrases):
+        x_0, y_0, x_1, y_1 = obj_bbox[0], obj_bbox[1], obj_bbox[2], obj_bbox[3]
+        draw.rectangle(
+            [int(x_0 * 512), int(y_0 * 512), int(x_1 * 512), int(y_1 * 512)],
+            outline="red",
+            width=5,
+        )
+        draw.text(
+            (int(x_0 * 512) + 5, int(y_0 * 512) + 5),
+            phrase,
+            font=None,
+            fill=(255, 0, 0),
+        )
+
+    return pil_img

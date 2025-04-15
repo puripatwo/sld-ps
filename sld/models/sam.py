@@ -56,7 +56,7 @@ def sam(
                 return_tensors="pt",
             ).to(torch_device)
             outputs = sam_model(**inputs)
-        print("checkpoint 1")
+        # print("checkpoint 1")
         masks = sam_processor.image_processor.post_process_masks(
             outputs.pred_masks.cpu().float(),
             inputs["original_sizes"].cpu(),
@@ -67,7 +67,7 @@ def sam(
     
     # Uncomment if experiencing out-of-memory error:
     utils.free_memory()
-    print("checkpoint 2")
+    # print("checkpoint 2")
     if return_numpy:
         masks = [
             F.interpolate(

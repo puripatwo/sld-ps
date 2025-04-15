@@ -104,58 +104,142 @@ def get_repos_info(entry, move_objects, models, config):
     return new_move_objects
 
 
+# # Operation #4: Attribute Modification (Preprocessing latent)
+# def get_attrmod_latent(entry, change_attr_objects, models, config):
+#     if len(change_attr_objects) == 0:
+#         return []
+    
+#     from diffusers import StableDiffusionDiffEditPipeline
+#     from diffusers import DDIMScheduler, DDIMInverseScheduler
+
+#     img = Image.open(entry["output"][-1])
+#     image_source = np.array(img)
+#     H, W, _ = image_source.shape
+#     inv_seed = int(config.get("SLD", "inv_seed"))
+
+#     # Initialize the Stable Diffusion pipeline
+#     pipe = StableDiffusionDiffEditPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-base", torch_dtype=torch.float16).to("cuda")
+#     pipe.inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+#     pipe.enable_model_cpu_offload()
+
+#     new_change_objects = []
+#     for obj in change_attr_objects:
+#         # Run diffedit
+#         old_object_region = run_sam_postprocess(run_sam(obj[1], image_source, models), H, W, config)
+#         old_object_region = old_object_region.astype(np.bool_)[np.newaxis, ...]
+
+#         new_object = obj[0].split(" #")[0]
+#         base_object = new_object.split(" ")[-1]
+#         mask_prompt = f"a {base_object}"
+#         new_prompt = f"a {new_object}"
+
+#         image_latents = pipe.invert(
+#             image=img,
+#             prompt=mask_prompt,
+#             inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+#             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+#         ).latents
+#         image = pipe(
+#             prompt=new_prompt,
+#             mask_image=old_object_region,
+#             image_latents=image_latents,
+#             guidance_scale=float(config.get("SLD", "diffedit_guidance_scale")),
+#             inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+#             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
+#             negative_prompt="",
+#         ).images[0]
+
+#         all_latents, _ = get_all_latents(np.array(image), models, inv_seed)
+#         new_change_objects.append(
+#             [
+#                 old_object_region[0],
+#                 all_latents,
+#             ]
+#         )
+#     return new_change_objects
+
+
 # Operation #4: Attribute Modification (Preprocessing latent)
 def get_attrmod_latent(entry, change_attr_objects, models, config):
     if len(change_attr_objects) == 0:
         return []
-    
+
     from diffusers import StableDiffusionDiffEditPipeline
     from diffusers import DDIMScheduler, DDIMInverseScheduler
 
-    img = Image.open(entry["output"][-1])
+    image_path = entry["output"][-1]
+    img = Image.open(image_path).convert("RGB")
     image_source = np.array(img)
     H, W, _ = image_source.shape
     inv_seed = int(config.get("SLD", "inv_seed"))
+    inpaint_strength = float(config.get("SLD", "diffedit_inpaint_strength"))
+    guidance_scale = float(config.get("SLD", "diffedit_guidance_scale"))
+    num_inference_steps = int(config.get("SLD", "num_inference_steps", fallback="41"))
 
-    # Initialize the Stable Diffusion pipeline
-    pipe = StableDiffusionDiffEditPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-base", torch_dtype=torch.float16).to("cuda")
-    pipe.inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+    # Initialize the pipeline and replace both schedulers
+    pipe = StableDiffusionDiffEditPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-2-1-base",
+        torch_dtype=torch.float16
+    ).to("cuda")
+
+    # Use custom schedulers and explicitly set timesteps
+    scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    inverse_scheduler = DDIMInverseScheduler.from_config(pipe.scheduler.config)
+
+    scheduler.set_timesteps(num_inference_steps)
+    inverse_scheduler.set_timesteps(num_inference_steps)
+
+    pipe.scheduler = scheduler
+    pipe.inverse_scheduler = inverse_scheduler
+
     pipe.enable_model_cpu_offload()
 
+    print("DEBUG: Scheduler timesteps:", len(pipe.scheduler.timesteps))
+    print("DEBUG: Inverse scheduler timesteps:", len(pipe.inverse_scheduler.timesteps))
+
     new_change_objects = []
+
     for obj in change_attr_objects:
-        # Run diffedit
-        old_object_region = run_sam_postprocess(run_sam(obj[1], image_source, models), H, W, config)
-        old_object_region = old_object_region.astype(np.bool_)[np.newaxis, ...]
+        old_object_region = run_sam_postprocess(
+            run_sam(obj[1], image_source, models),
+            H, W, config
+        ).astype(np.bool_)[np.newaxis, ...]
 
         new_object = obj[0].split(" #")[0]
         base_object = new_object.split(" ")[-1]
         mask_prompt = f"a {base_object}"
         new_prompt = f"a {new_object}"
 
-        image_latents = pipe.invert(
+        # Explicit inversion step
+        inversion_result = pipe.invert(
             image=img,
             prompt=mask_prompt,
-            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            inpaint_strength=inpaint_strength,
             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
-        ).latents
+            num_inference_steps=num_inference_steps,
+        )
+
+        image_latents = inversion_result.latents
+        print("DEBUG: Latents shape from inversion:", image_latents.shape)  # Should match scheduler steps
+
+        # Forward generation using inverted latents
         image = pipe(
             prompt=new_prompt,
             mask_image=old_object_region,
             image_latents=image_latents,
-            guidance_scale=float(config.get("SLD", "diffedit_guidance_scale")),
-            inpaint_strength=float(config.get("SLD", "diffedit_inpaint_strength")),
+            guidance_scale=guidance_scale,
+            inpaint_strength=inpaint_strength,
             generator=torch.Generator(device="cuda").manual_seed(inv_seed),
             negative_prompt="",
+            num_inference_steps=num_inference_steps,
         ).images[0]
 
         all_latents, _ = get_all_latents(np.array(image), models, inv_seed)
-        new_change_objects.append(
-            [
-                old_object_region[0],
-                all_latents,
-            ]
-        )
+        new_change_objects.append([
+            old_object_region[0],
+            all_latents,
+        ])
+
     return new_change_objects
 
 
@@ -166,7 +250,7 @@ def correction(entry, add_objects, move_objects, remove_region, change_attr_obje
         "prompt": entry["instructions"],
         "remove_region": remove_region,
         "change_objects": change_attr_objects,
-        "all_objects": entry["llm_suggestion"],
+        "all_objects": entry["llm_suggestions"],
         "bg_prompt": entry["bg_prompt"],
         "extra_neg_prompt": entry["neg_prompt"],
     }
