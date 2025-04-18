@@ -354,7 +354,7 @@ def main(args):
     else:
         device = "cpu"
 
-    # train(config, prompts, device)
+    train(config, prompts, device)
 
 
 if __name__ == "__main__":

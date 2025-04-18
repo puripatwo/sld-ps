@@ -207,7 +207,6 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             denoised_latents_low = denoised_latents_low.to(device, dtype=weight_dtype)
             low_noise = low_noise.to(device, dtype=weight_dtype)
 
-            generator = torch.manual_seed(seed)
             denoised_latents_high, high_noise = train_util.get_noisy_image(
                 img2,
                 vae,
@@ -390,7 +389,7 @@ def main(args):
 
     print(folders, scales)
     if len(scales) != len(folders):
-        raise Exception('the number of folders need to match the number of scales')
+        raise Exception('The number of folders need to match the number of scales.')
     
     if args.style_check is not None:
         check = args.style_check.split('-')

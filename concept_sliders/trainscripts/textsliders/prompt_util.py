@@ -61,7 +61,7 @@ def load_prompts_from_yaml(path, attributes = []):
     else:
         new_prompts = copy.deepcopy(prompts)
 
-    print(f"New Prompts: {prompts}")
+    print(f"New Prompts: {new_prompts}")
     print(len(prompts), len(new_prompts))
     prompt_settings = [PromptSettings(**prompt) for prompt in new_prompts]
 

@@ -44,7 +44,7 @@ class LoRAModule(nn.Module):
     def __init__(
         self,
         lora_name,
-        org_module: nn.Module,
+        orig_module: nn.Module,
         multiplier=1.0,
         lora_dim=4,
         alpha=1,
@@ -53,20 +53,21 @@ class LoRAModule(nn.Module):
         self.lora_name = lora_name
         self.lora_dim = lora_dim
 
-        if "Linear" in org_module.__class__.__name__:
-            in_dim = org_module.in_features
-            out_dim = org_module.out_features
+        if "Linear" in orig_module.__class__.__name__:
+            in_dim = orig_module.in_features
+            out_dim = orig_module.out_features
             self.lora_down = nn.Linear(in_dim, lora_dim, bias=False)
             self.lora_up = nn.Linear(lora_dim, out_dim, bias=False)
-        elif "Conv" in org_module.__class__.__name__:
-            in_dim = org_module.in_features
-            out_dim = org_module.out_features
+
+        elif "Conv" in orig_module.__class__.__name__:
+            in_dim = orig_module.in_features
+            out_dim = orig_module.out_features
             self.lora_dim = min(self.lora_dim, in_dim, out_dim)
             if self.lora_dim != lora_dim:
                 print(f"{lora_name} dim (rank) is changed to: {self.lora_dim}.")
-            kernel_size = org_module.kernel_size
-            stride = org_module.stride
-            padding = org_module.padding
+            kernel_size = orig_module.kernel_size
+            stride = orig_module.stride
+            padding = orig_module.padding
             self.lora_down = nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
             self.lora_up = nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
 
@@ -80,14 +81,16 @@ class LoRAModule(nn.Module):
         nn.init.zeros_(self.lora_up.weight)
         
         self.multiplier = multiplier
-        self.org_module = org_module
+        self.orig_module = orig_module
     
     def apply_to(self):
-        self.org_forward = self.org_module.forward
-        self.org_module.forward = self.forward
-        del self.org_module
+        # Injecting the original module's forward pass with the new LoRA-enhanced one
+        self.org_forward = self.orig_module.forward
+        self.orig_module.forward = self.forward
+        del self.orig_module
 
     def forward(self, x):
+        # Performing the LoRA forward formula
         return (self.org_forward(x) + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale)
 
 
@@ -125,12 +128,10 @@ class LoRANetwork(nn.Module):
             ), f"Duplicated LoRA name: {lora.lora_name}. {lora_names}."
             lora_names.add(lora.lora_name)
 
+        # Each LoRA module replaces the forward of its original layer, and is also registered so it shows up in .parameters() or .state_dict()
         for lora in self.unet_loras:
             lora.apply_to()
-            self.add_module(
-                lora.lora_name,
-                lora,
-            )
+            self.add_module(lora.lora_name, lora)
 
         del unet
         torch.cuda.empty_cache()
@@ -178,7 +179,8 @@ class LoRANetwork(nn.Module):
                         if train_method == 'noxattn-hspace-last':
                             if 'mid_block' not in name or '.1' not in name or 'conv2' not in child_name:
                                 continue
-
+                        
+                        # Instantiate a LoRAModule and store it
                         lora_name = prefix + "." + name + "." + child_name
                         lora_name = lora_name.replace(".", "_")
                         lora = self.module(lora_name, child_module, multiplier, rank, self.alpha)
@@ -196,6 +198,7 @@ class LoRANetwork(nn.Module):
     def prepare_optimizer_params(self):
         all_params = []
 
+        # Gather only trainable LoRA parameters so that they can be passed to the optimizer
         if self.unet_loras:
             params = []
             [params.extend(lora.parameters()) for lora in self.unet_loras]
@@ -212,7 +215,7 @@ class LoRANetwork(nn.Module):
                 v = state_dict[key]
                 v = v.detach().clone().to("cpu").to(dtype)
                 state_dict[key] = v
-
+        
 #         for key in list(state_dict.keys()):
 #             if not key.startswith("lora"):
 #                 # lora以外除外
@@ -222,12 +225,15 @@ class LoRANetwork(nn.Module):
             save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)
+    
+    def set_lora_slider(self, scale):
+        self.lora_scale = scale
 
-        def __enter__(self):
-            for lora in self.unet_loras:
-                lora.multiplier = 1.0 * self.lora_scale
+    def __enter__(self):
+        for lora in self.unet_loras:
+            lora.multiplier = 1.0 * self.lora_scale
 
-        def __exit__(self, exc_type, exc_value, tb):
-            for lora in self.unet_loras:
-                lora.multiplier = 0
-                
+    def __exit__(self, exc_type, exc_value, tb):
+        for lora in self.unet_loras:
+            lora.multiplier = 0
+            
