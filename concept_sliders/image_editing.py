@@ -346,7 +346,24 @@ if __name__ == "__main__":
             alpha=alpha,
             train_method=train_method,
         ).to(device, dtype=weight_dtype)
-    network.load_state_dict(torch.load(lora_weight))
+    # network.load_state_dict(torch.load(lora_weight))
+    state_dict = load_file(lora_weight)
+    missing, unexpected = network.load_state_dict(state_dict, strict=False)
+    print("Missing keys:", missing)
+    print("Unexpected keys:", unexpected)
+
+    # # From the model currently in memory
+    # print("Expected keys:")
+    # for k in network.state_dict().keys():
+    #     print(k)
+
+    # # From the .safetensors file
+    # from safetensors.torch import load_file
+    # state_dict = load_file(lora_weight)
+
+    # print("\nLoRA file keys:")
+    # for k in state_dict.keys():
+    #     print(k)
 
     width = 512
     height = 512
