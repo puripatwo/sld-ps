@@ -60,8 +60,8 @@ class LoRAModule(nn.Module):
             self.lora_up = nn.Linear(lora_dim, out_dim, bias=False)
 
         elif "Conv" in orig_module.__class__.__name__:
-            in_dim = orig_module.in_features
-            out_dim = orig_module.out_features
+            in_dim = orig_module.in_channels
+            out_dim = orig_module.out_channels
             self.lora_dim = min(self.lora_dim, in_dim, out_dim)
             if self.lora_dim != lora_dim:
                 print(f"{lora_name} dim (rank) is changed to: {self.lora_dim}.")
