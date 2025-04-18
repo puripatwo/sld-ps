@@ -411,8 +411,8 @@ if __name__ == "__main__":
     parser.add_argument('--base', help='Version of stable diffusion to use.', type=str, required=False, default='1.4')
     parser.add_argument('--guidance_scale', help='Guidance to run eval.', type=float, required=False, default=7.5)
     parser.add_argument('--image_size', help='Image size used to train.', type=int, required=False, default=512)
-    parser.add_argument('--till_case', help='Continue generating from case_number.', type=int, required=False, default=1000000)
     parser.add_argument('--from_case', help='Continue generating from case_number.', type=int, required=False, default=0)
+    parser.add_argument('--till_case', help='Continue generating until case_number.', type=int, required=False, default=1000000)
     parser.add_argument('--num_samples', help='Number of samples per prompt.', type=int, required=False, default=5)
     parser.add_argument('--ddim_steps', help='DDIM steps of inference used to train.', type=int, required=False, default=50)
     parser.add_argument('--rank', help='Rank of the LoRA.', type=int, required=False, default=4)
@@ -479,7 +479,9 @@ if __name__ == "__main__":
             alpha=alpha,
             train_method=train_method,
         ).to(device, dtype=weight_dtype)
-    network.load_state_dict(torch.load(lora_weight))
+    # network.load_state_dict(torch.load(lora_weight))
+    state_dict = load_file(lora_weight)
+    network.load_state_dict(state_dict)
 
     # 4. Convert the prompts .csv file to a DataFrame.
     df = pd.read_csv(prompts_path)
