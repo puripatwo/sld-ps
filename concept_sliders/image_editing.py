@@ -329,13 +329,13 @@ if __name__ == "__main__":
     else:
         train_method = 'noxattn'
 
-    # network_type = "c3lier"
-    # if train_method == 'xattn':
-    #     network_type = 'lierla'
+    network_type = "c3lier"
+    if train_method == 'xattn':
+        network_type = 'lierla'
 
-    # modules = DEFAULT_TARGET_REPLACE
-    # if network_type == "c3lier":
-    #     modules += UNET_TARGET_REPLACE_MODULE_CONV
+    modules = DEFAULT_TARGET_REPLACE
+    if network_type == "c3lier":
+        modules += UNET_TARGET_REPLACE_MODULE_CONV
 
     # 5
     lora_weight = model_name
@@ -407,7 +407,7 @@ if __name__ == "__main__":
             # Predict the noise residual
             with torch.no_grad():
                 with network:
-                    noise_pred = unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+                    noise_pred = unet(latent_model_input, t, encoder_hidden_states=combined_text_embeddings).sample
 
             # Perform guidance
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
