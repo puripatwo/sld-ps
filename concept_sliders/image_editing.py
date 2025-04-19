@@ -276,7 +276,7 @@ if __name__ == "__main__":
     weight_dtype = torch.float32
     scales = [0, 1, 2, 3]
     for scale in scales:
-        os.makedirs(os.path.join(save_path, os.path.basename(model_name), str(scale)), exist_ok=True)
+        os.makedirs(os.path.join(save_path, os.path.basename(model_name), os.path.basename(image_path)), exist_ok=True)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
@@ -428,6 +428,6 @@ if __name__ == "__main__":
         pil_images = [Image.fromarray(image) for image in images]
 
         # 6.6. Loop through each generated image and store them.
-        for idx, im in enumerate(pil_images):
-            image_filename = f"image_{idx}"
-            im.save(os.path.join(os.path.join(save_path, os.path.basename(lora_weight), str(scale)), image_filename))
+        for im in pil_images:
+            image_filename = f"{scale}.png"
+            im.save(os.path.join(os.path.join(save_path, os.path.basename(lora_weight), os.path.basename(image_path)), image_filename))
