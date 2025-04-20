@@ -240,7 +240,8 @@ def train(args):
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    logging.info(accelerator.state, main_process_only=False)
+    if accelerator.is_main_process:
+        logging.info(accelerator.state)
 
     # 0.3. Only the main process should show informational or warning logs.
     if accelerator.is_local_main_process:

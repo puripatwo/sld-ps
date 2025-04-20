@@ -2,7 +2,7 @@ import torch
 import copy
 import yaml
 
-from typing import Literal, Optional, List, Union
+from typing import Literal, Optional, List, Union, Dict
 from pathlib import Path
 from pydantic import BaseModel, root_validator
 
@@ -81,7 +81,7 @@ PROMPT_EMBEDDING = Union[torch.FloatTensor, PromptEmbedsXL]
 
 
 class PromptEmbedsCache:  # 使いまわしたいので
-    prompts: dict[str, PROMPT_EMBEDDING] = {}
+    prompts: Dict[str, PROMPT_EMBEDDING] = {}
 
     def __setitem__(self, __name: str, __value: PROMPT_EMBEDDING) -> None:
         self.prompts[__name] = __value
@@ -129,6 +129,7 @@ class PromptEmbedsPair:
         self.batch_size = settings.batch_size
         self.dynamic_crops = settings.dynamic_crops
         self.action = settings.action
+        self.settings = settings
 
     def _erase(
         self,
@@ -136,10 +137,11 @@ class PromptEmbedsPair:
         positive_latents: torch.FloatTensor,  # "van gogh"
         unconditional_latents: torch.FloatTensor,  # ""
         neutral_latents: torch.FloatTensor,  # ""
+        scale: float = 1.0,
     ) -> torch.FloatTensor:
         
-        """Target latents are going not to have the positive concept."""
-        return self.loss_fn(target_latents, neutral_latents - self.guidance_scale * (positive_latents - unconditional_latents))
+        """Target latents are going to not have the positive concept."""
+        return self.loss_fn(target_latents, neutral_latents - scale * self.guidance_scale * (positive_latents - unconditional_latents))
     
     def _enhance(
         self,
@@ -147,10 +149,11 @@ class PromptEmbedsPair:
         positive_latents: torch.FloatTensor,  # "van gogh"
         unconditional_latents: torch.FloatTensor,  # ""
         neutral_latents: torch.FloatTensor,  # ""
+        scale: float = 1.0,
     ):
         
         """Target latents are going to have the positive concept."""
-        return self.loss_fn(target_latents, neutral_latents + self.guidance_scale * (positive_latents - unconditional_latents))
+        return self.loss_fn(target_latents, neutral_latents + scale * self.guidance_scale * (positive_latents - unconditional_latents))
     
     def loss(
         self,
