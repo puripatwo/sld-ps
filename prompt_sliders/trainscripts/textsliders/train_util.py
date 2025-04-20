@@ -125,6 +125,7 @@ def encode_prompts_slider(
     text_tokens = text_tokenize(tokenizer, prompts)
     text_embeddings = text_encode(text_encoder, text_tokens)
 
+    # Boosts or reduces the impact of each word
     idx = text_tokens.argmax(-1)
     batch_indices = torch.arange(len(text_tokens))
     text_embeddings[batch_indices, idx, :] = sc * text_embeddings[batch_indices, idx, :]

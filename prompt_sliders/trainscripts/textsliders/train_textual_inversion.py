@@ -156,7 +156,7 @@ def parse_args():
     parser.add_argument("--revision", type=str, default=None, required=False, help="Revision of pretrained model identifier from huggingface.co/models.")
     parser.add_argument("--variant", type=str, default=None, help="Variant of the model files of the pretrained model identifier from huggingface.co/models, e.g., fp16.")
     parser.add_argument("--tokenizer_name", type=str, default=None, help="Pretrained tokenizer name or path if not the same as model_name.") ###
-    parser.add_argument("--train_data_dir", type=str, default=None, required=True, help="A folder containing the training data.")
+    # parser.add_argument("--train_data_dir", type=str, default=None, required=True, help="A folder containing the training data.")
     parser.add_argument("--placeholder_token", type=str, default=None, required=True, help="A token to use as a placeholder for the concept.")
     parser.add_argument("--initializer_token", type=str, default=None, required=True, help="A token to use as initializer word.")
     parser.add_argument("--learnable_property", type=str, default="object", help="Choose between 'object' and 'style'.")
@@ -203,17 +203,13 @@ def parse_args():
     return args
 
 
-def main(args):
+def train(args):
     # Check if LOCAL_RANK is set (1)
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
-
-    # Check if a train data directory is provided (2)
-    if args.train_data_dir is None:
-        raise ValueError("You must specify a train data directory when using visual prompt sliders.")
     
-    # Check if WandB is available (3)
+    # Check if WandB is available (2)
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
             "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
@@ -223,7 +219,7 @@ def main(args):
         if not is_wandb_available():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
     
-    # If passed along, set the training seed now (4)
+    # If passed along, set the training seed now (3)
     if args.seed is not None:
         set_seed(args.seed)
     
@@ -419,42 +415,40 @@ def main(args):
         num_cycles=args.lr_num_cycles,
     )
 
-    # Set the text encoder to train mode
+    # Set the text encoder to train mode (1)
     text_encoder.train()
     text_encoder, optimizer, lr_scheduler = accelerator.prepare(text_encoder, optimizer, lr_scheduler)
 
-    # For mixed precision training, we cast all non-trainable weights to half-precision as these weights are only used for inference, keeping weights in full precision is not required
+    # For mixed precision training, we cast all non-trainable weights to half-precision as these weights are only used for inference, keeping weights in full precision is not required (2)
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Move vae and unet to device and cast to weight_dtype
+    # Move vae and unet to device and cast to weight_dtype (3)
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
 
-    # We need to recalculate our total training steps as the size of the training dataloader may have changed
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed (4)
     num_update_steps_per_epoch = math.ceil(1 / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    # We need to initialize the trackers we use, and also store our configuration
+    # We need to initialize the trackers we use, and also store our configuration (5)
     if accelerator.is_main_process:
-        # The trackers initializes automatically on the main process
         accelerator.init_trackers("textual_inversion", config=vars(args))
 
-    # Calculate the total batch size
+    # Calculate the total batch size (6)
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {args.max_train_steps}")
+    logger.info("***** TRAINING *****")
+    logger.info(f"  Total Optimizer Steps = {args.max_train_steps}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Train Batch Size (per device) = {args.train_batch_size}")
+    logger.info(f"  Total Train Batch Size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Gradient Accumulation Steps = {args.gradient_accumulation_steps}")
 
     # 6. Potentially load in the weights and states from a previous save.
     global_step = 0
@@ -740,4 +734,4 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
 
-    main(args)
+    train(args)
