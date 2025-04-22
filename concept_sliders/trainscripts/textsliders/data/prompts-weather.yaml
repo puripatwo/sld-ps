@@ -1,0 +1,9 @@
+- target: "day"
+  positive: "rainy day with gray overcast sky and falling rain"
+  unconditional: "sunny day with golden light and clear skies"
+  neutral: "day"
+  action: "enhance"
+  guidance_scale: 4
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1

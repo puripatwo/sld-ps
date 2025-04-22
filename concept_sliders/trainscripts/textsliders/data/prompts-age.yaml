@@ -1,5 +1,5 @@
-- target: "person" # what word for erasing the positive concept from
-  positive: "old person" # concept to erase
+- target: "person" # what word to enhance the positive concept
+  positive: "old person" # concept to enhance
   unconditional: "young person" # word to take the difference from the positive concept
   neutral: "person" # starting point for conditioning the target
   action: "enhance" # erase or enhance
@@ -7,4 +7,3 @@
   resolution: 512
   dynamic_resolution: false
   batch_size: 1
-  

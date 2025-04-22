@@ -1,0 +1,9 @@
+- target: "blue sky"
+  positive: "pink sky with hues of lavender and coral at the horizon"
+  unconditional: "blue sky with light daylight tones"
+  neutral: "blue sky"
+  action: "enhance"
+  guidance_scale: 4
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1

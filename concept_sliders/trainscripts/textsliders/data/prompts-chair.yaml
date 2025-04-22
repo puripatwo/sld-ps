@@ -1,0 +1,9 @@
+- target: "seating furniture"
+  positive: "soft cushioned sofa with fabric texture and wide armrests"
+  unconditional: "wooden chair with a hard surface and vertical slats"
+  neutral: "seating furniture"
+  action: "enhance"
+  guidance_scale: 4
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
