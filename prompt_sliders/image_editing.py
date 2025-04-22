@@ -273,7 +273,7 @@ if __name__ == "__main__":
 
     model_name = args.model_name
     image_path = args.image_path
-    image_prompt = args.image_prompt
+    image_prompt = f"{args.image_prompt}, <{args.placeholder_token}>"
     learned_embeds_path = args.learned_embeds_path
     placeholder_token = args.placeholder_token
     save_path = args.save_path

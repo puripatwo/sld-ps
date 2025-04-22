@@ -47,7 +47,7 @@ if __name__ == "__main__":
     weight_dtype = torch.float32
     scales = [0, 0.5, 1.0, 1.5]
     for scale in scales:
-        os.makedirs(os.path.join(save_path, os.path.basename(model_name), os.path.basename(scale)), exist_ok=True)
+        os.makedirs(os.path.join(save_path, os.path.basename(model_name), str(scale)), exist_ok=True)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
@@ -85,7 +85,7 @@ if __name__ == "__main__":
     text_encoder.to(device, dtype=weight_dtype)
 
     prompts = [
-        f"a photo of a man, <{placeholder_token}>",
+        f"a photo of a man, {placeholder_token}",
         ]
     start_noise = 800
     num_images_per_prompt = 1
@@ -170,4 +170,4 @@ if __name__ == "__main__":
                 # 6.7. Loop through each generated image and store them.
                 for im in pil_images:
                     image_filename = f"{case_number}_{num}.png"
-                    im.save(os.path.join(os.path.join(save_path, os.path.basename(model_name), os.path.basename(scale)), image_filename))
+                    im.save(os.path.join(os.path.join(save_path, os.path.basename(model_name), str(scale)), image_filename))
