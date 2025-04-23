@@ -17,6 +17,7 @@ from models import sam
 from models.sam import run_sam, run_sam_postprocess
 from models.pipelines import get_all_latents
 from models.detector import OWLVITV2Detector
+from models.sdxl_refine import sdxl_refine
 
 from utils import parse, utils, resize_image
 
@@ -512,6 +513,10 @@ if __name__ == "__main__":
                     logging.info(f"Image {fname} is already correct!")
                 else:
                     logging.info(f"Image {fname} is still incorrect!")
+
+        sdxl_output_fname = os.path.join(dirname, f"final_{input_fname}.png")
+        sdxl_refine(prompt, intermediate_output_fname, sdxl_output_fname)
+        logging.info(f"* Output File (After SDXL): {sdxl_output_fname}")
         
         with open(os.path.join(dirname, "chatgpt_data.json"), 'w') as f:
             json.dump(chatgpt_data, f)
