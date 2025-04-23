@@ -1,7 +1,7 @@
-- target: "green apple"
-  positive: "red apple with glossy skin, vibrant color, freshly picked"
-  unconditional: "green apple with matte skin, subtle color, unripe appearance"
-  neutral: "green apple"
+- target: "apple"
+  positive: "red apple"
+  unconditional: "green apple"
+  neutral: "apple"
   action: "enhance"
   guidance_scale: 4
   resolution: 512
