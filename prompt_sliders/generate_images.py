@@ -167,7 +167,13 @@ if __name__ == "__main__":
                 images = (image * 255).round().astype("uint8")
                 pil_images = [Image.fromarray(image) for image in images]
 
-                # 6.7. Loop through each generated image and store them.
+                # 7. Loop through each generated image and store them.
                 for im in pil_images:
                     image_filename = f"{case_number}_{num}.png"
                     im.save(os.path.join(os.path.join(save_path, os.path.basename(model_name), str(scale)), image_filename))
+
+    # 8. Clear memory and empty cache.
+    del unet
+    unet = None
+    torch.cuda.empty_cache()
+    flush()
