@@ -59,7 +59,8 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     text_encoder.eval() # Freezes Text Encoder
 
     unet.to(device, dtype=weight_dtype)
-    unet.enable_xformers_memory_efficient_attention()
+    if config.other.use_xformers:
+        unet.enable_xformers_memory_efficient_attention()
     unet.requires_grad_(False)
     unet.eval() # Freezes UNet
 

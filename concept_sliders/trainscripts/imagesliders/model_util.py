@@ -176,3 +176,93 @@ def load_models(
     )
 
     return tokenizer, text_encoder, unet, scheduler, vae
+
+
+def load_diffusers_model_xl(
+    pretrained_model_name_or_path: str,
+    weight_dtype: torch.dtype = torch.float32,
+) -> tuple[list[CLIPTokenizer], list[SDXL_TEXT_ENCODER_TYPE], UNet2DConditionModel,]:
+    # returns tokenizer, tokenizer_2, text_encoder, text_encoder_2, unet
+
+    tokenizers = [
+        CLIPTokenizer.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            torch_dtype=weight_dtype,
+            cache_dir=DIFFUSERS_CACHE_DIR,
+        ),
+        CLIPTokenizer.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="tokenizer_2",
+            torch_dtype=weight_dtype,
+            cache_dir=DIFFUSERS_CACHE_DIR,
+            pad_token_id=0,  # same as open clip
+        ),
+    ]
+
+    text_encoders = [
+        CLIPTextModel.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="text_encoder",
+            torch_dtype=weight_dtype,
+            cache_dir=DIFFUSERS_CACHE_DIR,
+        ),
+        CLIPTextModelWithProjection.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="text_encoder_2",
+            torch_dtype=weight_dtype,
+            cache_dir=DIFFUSERS_CACHE_DIR,
+        ),
+    ]
+
+    unet = UNet2DConditionModel.from_pretrained(
+        pretrained_model_name_or_path,
+        subfolder="unet",
+        torch_dtype=weight_dtype,
+        cache_dir=DIFFUSERS_CACHE_DIR,
+    )
+
+    vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, subfolder="vae")
+
+    return tokenizers, text_encoders, unet, vae
+
+
+def load_checkpoint_model_xl(
+    checkpoint_path: str,
+    weight_dtype: torch.dtype = torch.float32,
+) -> tuple[list[CLIPTokenizer], list[SDXL_TEXT_ENCODER_TYPE], UNet2DConditionModel,]:
+    
+    pipe = StableDiffusionXLPipeline.from_single_file(
+        checkpoint_path,
+        torch_dtype=weight_dtype,
+        cache_dir=DIFFUSERS_CACHE_DIR,
+    )
+    unet = pipe.unet
+    tokenizers = [pipe.tokenizer, pipe.tokenizer_2]
+    text_encoders = [pipe.text_encoder, pipe.text_encoder_2]
+    if len(text_encoders) == 2:
+        text_encoders[1].pad_token_id = 0
+    vae = pipe.vae
+
+    del pipe
+    return tokenizers, text_encoders, unet, vae
+
+
+def load_models_xl(
+    pretrained_model_name_or_path: str,
+    scheduler_name: AVAILABLE_SCHEDULERS,
+    weight_dtype: torch.dtype = torch.float32,
+) -> tuple[list[CLIPTokenizer], list[SDXL_TEXT_ENCODER_TYPE], UNet2DConditionModel, SchedulerMixin,]:
+    
+    if pretrained_model_name_or_path.endswith(".ckpt") or pretrained_model_name_or_path.endswith(".safetensors"):
+        tokenizers, text_encoders, unet, vae = load_checkpoint_model_xl(
+            pretrained_model_name_or_path, weight_dtype
+        )
+    else:
+        tokenizers, text_encoders, unet, vae = load_diffusers_model_xl(
+            pretrained_model_name_or_path, weight_dtype
+        )
+
+    scheduler = create_noise_scheduler(scheduler_name)
+
+    return tokenizers, text_encoders, unet, scheduler, vae

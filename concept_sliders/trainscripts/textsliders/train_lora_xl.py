@@ -1,12 +1,8 @@
 import torch
 import gc
-import os, glob
 import argparse
 import ast
 import wandb
-import random
-import numpy as np
-from PIL import Image
 from typing import Optional, List
 from pathlib import Path
 from tqdm import tqdm
@@ -15,12 +11,14 @@ import config_util
 from config_util import RootConfig
 
 import prompt_util
-from prompt_util import PromptSettings, PromptEmbedsCache, PromptEmbedsPair
+from prompt_util import PromptSettings, PromptEmbedsCache, PromptEmbedsPair, PromptEmbedsXL
 
 import model_util
 import train_util
 import debug_util
 from lora import LoRANetwork, DEFAULT_TARGET_REPLACE, UNET_TARGET_REPLACE_MODULE_CONV
+
+NUM_IMAGES_PER_PROMPT = 1
 
 
 def flush():
@@ -28,11 +26,7 @@ def flush():
     gc.collect()
 
 
-def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder_main: str, folders, scales):
-    folders = np.array(folders)
-    scales = np.array(scales)
-    scales_unique = list(scales)
-
+def train(config: RootConfig, prompts: list[PromptSettings], device: int):
     # Create a prompt dictionary (1)
     metadata = {
         "prompts": ",".join([prompt.json() for prompt in prompts]),
@@ -46,35 +40,31 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
     modules = DEFAULT_TARGET_REPLACE # ["Attention"]
     if config.network.type == "c3lier":
         modules += UNET_TARGET_REPLACE_MODULE_CONV
-    
+
     # Initialize wandb (3)
     if config.logging.use_wandb:
         wandb.init(project=f"LECO_{config.save.name}", config=metadata)
-    
+
     # Set the precision (4)
     weight_dtype = config_util.parse_precision(config.train.precision)
     save_weight_dtype = config_util.parse_precision(config.train.precision)
 
     # 1. Load the pre-trained models.
-    tokenizer, text_encoder, unet, noise_scheduler, vae = model_util.load_models(
+    tokenizers, text_encoders, unet, noise_scheduler = model_util.load_models_xl(
         config.pretrained_model.name_or_path,
         scheduler_name=config.train.noise_scheduler,
-        v2=config.pretrained_model.v2,
-        v_pred=config.pretrained_model.v_pred,
     )
 
-    text_encoder.to(device, dtype=weight_dtype)
-    text_encoder.eval() # Freezes Text Encoder
+    for text_encoder in text_encoders:
+        text_encoder.to(device, dtype=weight_dtype)
+        text_encoder.requires_grad_(False)
+        text_encoder.eval() # Freezes Text Encoder
 
     unet.to(device, dtype=weight_dtype)
     if config.other.use_xformers:
         unet.enable_xformers_memory_efficient_attention()
     unet.requires_grad_(False)
     unet.eval() # Freezes UNet
-
-    vae.to(device)
-    vae.requires_grad_(False)
-    vae.eval()
 
     ### LoRA ###
     # 2. Set up LoRA.
@@ -128,19 +118,26 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             ]:
                 print(prompt)
 
-                if isinstance(prompt, list):
-                    if prompt == settings.positive:
-                        key_setting = 'positive'
-                    else:
-                        key_setting = 'attributes'
-                    if len(prompt) == 0:
-                        cache[key_setting] = []
-                    else:
-                        if cache[key_setting] is None:
-                            cache[key_setting] = train_util.encode_prompts(tokenizer, text_encoder, prompt)
-                else:
-                    if cache[prompt] == None:
-                        cache[prompt] = train_util.encode_prompts(tokenizer, text_encoder, [prompt])
+                # if isinstance(prompt, list):
+                #     if prompt == settings.positive:
+                #         key_setting = 'positive'
+                #     else:
+                #         key_setting = 'attributes'
+                #     if len(prompt) == 0:
+                #         cache[key_setting] = []
+                #     else:
+                #         if cache[key_setting] is None:
+                #             cache[key_setting] = train_util.encode_prompts(tokenizer, text_encoder, prompt)
+                # else:
+                #     if cache[prompt] == None:
+                #         cache[prompt] = train_util.encode_prompts(tokenizer, text_encoder, [prompt])
+
+                if cache[prompt] == None:
+                    text_embeds, pooled_embeds = train_util.encode_prompts_xl(tokenizers, text_encoders, [prompt], num_images_per_prompt=NUM_IMAGES_PER_PROMPT)
+                    cache[prompt] = PromptEmbedsXL(
+                        text_embeds,
+                        pooled_embeds
+                    )
 
             prompt_pairs.append(PromptEmbedsPair(
                 criteria,
@@ -151,12 +148,13 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 settings,
             ))
 
-    del tokenizer
-    del text_encoder
+    for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+        del tokenizer, text_encoder
     flush()
 
     # 6. Start the training loop.
     pbar = tqdm(range(config.train.iterations))
+    loss = None
     for i in pbar:
         with torch.no_grad():
             noise_scheduler.set_timesteps(
@@ -169,7 +167,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 torch.randint(0, len(prompt_pairs), (1,)).item()
             ]
             
-            timesteps_to = torch.randint(1, config.train.max_denoising_steps - 1, (1,)).item()  # 1, 25, (1,)
+            timesteps_to = torch.randint(1, config.train.max_denoising_steps, (1,)).item()
 
             # 6.2. Set up dynamic resolution.
             height, width = (prompt_pair.resolution, prompt_pair.resolution)
@@ -183,45 +181,43 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             #     if prompt_pair.dynamic_resolution:
             #         print("bucketed resolution:", (height, width))
             #     print("batch_size:", prompt_pair.batch_size)
-            
-            # 6.3. Select an image pair from folders.
-            scale_to_look = abs(random.choice(scales_unique))
-            folder1 = folders[scales==-scale_to_look][0]  # folder1 = 'smallsize'
-            folder2 = folders[scales==scale_to_look][0]  # folder2 = 'bigsize'
 
-            ims = os.listdir(f'{folder_main}/{folder1}/')  # datasets/eyesize/smallsize/
-            ims = [im_ for im_ in ims if '.png' in im_ or '.jpg' in im_ or '.jpeg' in im_ or '.webp' in im_]
+            # 6.3. Generating latents.
+            latents = train_util.get_initial_latents(
+                noise_scheduler, prompt_pair.batch_size, height, width, 1
+            ).to(device, dtype=weight_dtype)
 
-            # 6.4. Retrieve the input images.
-            random_sampler = random.randint(0, len(ims)-1)
-            img1 = Image.open(f'{folder_main}/{folder1}/{ims[random_sampler]}').resize((256,256))
-            img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
+            # 6.4. Prepare a time embedding input vector for the UNet.
+            add_time_ids = train_util.get_add_time_ids(
+                height,
+                width,
+                dynamic_crops=prompt_pair.dynamic_crops,
+                dtype=weight_dtype,
+            ).to(device, dtype=weight_dtype)
 
-            seed = random.randint(0, 2 * 15)
-            generator = torch.manual_seed(seed)
-
-            # 6.5. Encode images into latents and add noise.
-            denoised_latents_low, low_noise = train_util.get_noisy_image(
-                img1,
-                vae,
-                generator,
-                unet,
-                noise_scheduler,
-                start_timesteps=0,
-                total_timesteps=timesteps_to)
-            denoised_latents_low = denoised_latents_low.to(device, dtype=weight_dtype)
-            low_noise = low_noise.to(device, dtype=weight_dtype)
-
-            denoised_latents_high, high_noise = train_util.get_noisy_image(
-                img2,
-                vae,
-                generator,
-                unet,
-                noise_scheduler,
-                start_timesteps=0,
-                total_timesteps=timesteps_to)
-            denoised_latents_high = denoised_latents_high.to(device, dtype=weight_dtype)
-            high_noise = high_noise.to(device, dtype=weight_dtype)
+            # 6.5. Denoising process.
+            with network:
+                denoised_latents = train_util.diffusion_xl(
+                    unet,
+                    noise_scheduler,
+                    latents,  # 単純なノイズのlatentsを渡す
+                    text_embeddings=train_util.concat_embeddings(
+                        prompt_pair.unconditional.text_embeds,
+                        prompt_pair.target.text_embeds,
+                        prompt_pair.batch_size,
+                    ),
+                    add_text_embeddings=train_util.concat_embeddings(
+                        prompt_pair.unconditional.pooled_embeds,
+                        prompt_pair.target.pooled_embeds,
+                        prompt_pair.batch_size,
+                    ),
+                    add_time_ids=train_util.concat_embeddings(
+                        add_time_ids, add_time_ids, prompt_pair.batch_size
+                    ),
+                    start_timesteps=0,
+                    total_timesteps=timesteps_to,
+                    guidance_scale=3,
+                )
 
             # 6.6. Set to be in the same proportions as max_denoising_steps.
             noise_scheduler.set_timesteps(1000)
@@ -229,104 +225,135 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 int(timesteps_to * 1000 / config.train.max_denoising_steps)
             ]
 
-            # Predicting noise of high latents
-            high_latents = train_util.predict_noise(
+            # Predicting noise of positive latents
+            positive_latents = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
-                denoised_latents_high,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.positive,
+                denoised_latents,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.positive.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.positive.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=weight_dtype)
 
-            # Predicting noise of low latents
-            low_latents = train_util.predict_noise(
+            # Predicting noise of neutral latents
+            neutral_latents = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
-                denoised_latents_low,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.unconditional,
+                denoised_latents,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.neutral.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.neutral.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=weight_dtype)
+
+            # Predicting noise of unconditional latents
+            unconditional_latents = train_util.predict_noise_xl(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
 
             if config.logging.verbose:
-                print("high_latents:", high_latents[0, 0, :5, :5])
-                print("low_latents:", low_latents[0, 0, :5, :5])
-
-        # 6.7. Train with positive scale.
-        network.set_lora_slider(scale=scale_to_look)
-        with network:
-            # Predicting noise of target latents (high)
-            target_latents_high = train_util.predict_noise(
-                unet,
-                noise_scheduler,
-                current_timestep,
-                denoised_latents_high,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.positive,
-                    prompt_pair.batch_size,
-                ),
-                guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
-
-            if config.logging.verbose:
-                print("target_latents_high:", target_latents_high[0, 0, :5, :5])
-
-        high_latents.requires_grad = False
-        low_latents.requires_grad = False
-
-        loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
-        pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
-        loss_high.backward()
-
-        # 6.8. Train with negative scale.
-        network.set_lora_slider(scale=-scale_to_look)
-        with network:
-            # Predicting noise of target latents (low)
-            target_latents_low = train_util.predict_noise(
-                unet,
-                noise_scheduler,
-                current_timestep,
-                denoised_latents_low,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.neutral,
-                    prompt_pair.batch_size,
-                ),
-                guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
-
-            if config.logging.verbose:
-                print("target_latents_low:", target_latents_low[0, 0, :5, :5])
-            
-        high_latents.requires_grad = False
-        low_latents.requires_grad = False
+                print("positive_latents:", positive_latents[0, 0, :5, :5])
+                print("neutral_latents:", neutral_latents[0, 0, :5, :5])
+                print("unconditional_latents:", unconditional_latents[0, 0, :5, :5])
         
-        loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
-        pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
-        loss_low.backward()
+        # Predicting noise of target latents
+        with network:
+            target_latents = train_util.predict_noise_xl(
+                unet,
+                noise_scheduler,
+                current_timestep,
+                denoised_latents,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.target.text_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.target.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
+                guidance_scale=1,
+            ).to(device, dtype=weight_dtype)
 
+            if config.logging.verbose:
+                print("target_latents:", target_latents[0, 0, :5, :5])
+
+        positive_latents.requires_grad = False
+        neutral_latents.requires_grad = False
+        unconditional_latents.requires_grad = False
+
+        # 6.7. Calculating the loss.
+        loss = prompt_pair.loss(
+            target_latents=target_latents,
+            positive_latents=positive_latents,
+            neutral_latents=neutral_latents,
+            unconditional_latents=unconditional_latents,
+        )
+
+        # 6.8. Logs loss and learning rate to wandb for monitoring.
+        pbar.set_description(f"Loss*1k: {loss.item()*1000:.4f}")
+        if config.logging.use_wandb:
+            wandb.log({"loss": loss, "iteration": i, "lr": lr_scheduler.get_last_lr()[0]})
+
+        # 6.9. Performing backpropagation to update LoRA parameters.
+        loss.backward()
         optimizer.step()
         lr_scheduler.step()
 
         del (
-            high_latents,
-            low_latents,
-            target_latents_low,
-            target_latents_high,
+            positive_latents,
+            neutral_latents,
+            unconditional_latents,
+            target_latents,
+            latents,
         )
         flush()
 
-        # 6.9. Saves model checkpoints periodically.
+        # 6.10. Saves model checkpoints periodically.
         if (i % config.save.per_steps == 0 and i != 0 and i != config.train.iterations - 1):
             print("Saving...")
             save_path.mkdir(parents=True, exist_ok=True)
@@ -354,7 +381,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
     flush()
 
     print("Done.")
-
+            
 
 def main(args):
     config_file = args.config_file
@@ -372,7 +399,7 @@ def main(args):
         config.network.alpha = args.alpha
     if args.rank is not None:
         config.network.rank = args.rank
-    
+
     config.save.name += f'_alpha{config.network.alpha}'
     config.save.name += f'_rank{config.network.rank}'
     config.save.name += f'_{config.network.training_method}'  # eyeslider_alpha1.0_rank4_noxattn
@@ -380,34 +407,13 @@ def main(args):
 
     prompts = prompt_util.load_prompts_from_yaml(config.prompts_file, attributes)
     print(prompts)
-    
+
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.device}")
     else:
         device = "cpu"
 
-    folders = args.folders.split(',')
-    folders = [f.strip() for f in folders]
-    scales = args.scales.split(',')
-    scales = [f.strip() for f in scales]
-    scales = [int(s) for s in scales]
-
-    print(folders, scales)
-    if len(scales) != len(folders):
-        raise Exception('The number of folders need to match the number of scales.')
-    
-    if args.style_check is not None:
-        check = args.style_check.split('-')
-        for i in range(int(check[0]), int(check[1])):
-            folder_main = args.folder_main + f'{i}'  # datasets/eyesize/{i}
-            config.save.name = f'{os.path.basename(folder_main)}'  # {i}
-            config.save.name += f'_alpha{args.alpha}'
-            config.save.name += f'_rank{config.network.rank }'
-            config.save.name += f'_{config.network.training_method}'  # {i}_alpha1.0_rank4_noxattn
-            config.save.path = f'models/{config.save.name}'  # models/{i}_alpha1.0_rank4_noxattn
-            train(config=config, prompts=prompts, device=device, folder_main=folder_main, folders=folders, scales=scales)
-    else:
-        train(config=config, prompts=prompts, device=device, folder_main=args.folder_main, folders=folders, scales=scales)
+    train(config, prompts, device)
 
 
 if __name__ == "__main__":
@@ -419,10 +425,6 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, required=False, default=0, help="Device to train on.") # --device 0
     parser.add_argument("--name", type=str, required=False, default=None, help="Name of the slider.") # --name 'eyesize_slider'
     parser.add_argument("--attributes", type=str, required=False, default=None, help="Attributes to disentangle (comma seperated string).") # --attributes 'male, female'
-    parser.add_argument("--folder_main", type=str, required=True, help="The folder to check.")
-    parser.add_argument("--folders", type=str, required=False, default='verylow, low, high, veryhigh', help="Folders with different attribute-scaled images.")
-    parser.add_argument("--style_check", type=str, required=False, default=None, help="The style to check.")
-    parser.add_argument("--scales", type=str, required=False, default='-2, -1, 1, 2', help="Scales for different attribute-scaled images.")
     args = parser.parse_args()
 
     main(args)

@@ -15,12 +15,14 @@ import config_util
 from config_util import RootConfig
 
 import prompt_util
-from prompt_util import PromptSettings, PromptEmbedsCache, PromptEmbedsPair
+from prompt_util import PromptSettings, PromptEmbedsCache, PromptEmbedsPair, PromptEmbedsXL
 
 import model_util
 import train_util
 import debug_util
 from lora import LoRANetwork, DEFAULT_TARGET_REPLACE, UNET_TARGET_REPLACE_MODULE_CONV
+
+NUM_IMAGES_PER_PROMPT = 1
 
 
 def flush():
@@ -56,15 +58,15 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
     save_weight_dtype = config_util.parse_precision(config.train.precision)
 
     # 1. Load the pre-trained models.
-    tokenizer, text_encoder, unet, noise_scheduler, vae = model_util.load_models(
+    tokenizers, text_encoders, unet, noise_scheduler, vae = model_util.load_models_xl(
         config.pretrained_model.name_or_path,
         scheduler_name=config.train.noise_scheduler,
-        v2=config.pretrained_model.v2,
-        v_pred=config.pretrained_model.v_pred,
     )
 
-    text_encoder.to(device, dtype=weight_dtype)
-    text_encoder.eval() # Freezes Text Encoder
+    for text_encoder in text_encoders:
+        text_encoder.to(device, dtype=weight_dtype)
+        text_encoder.requires_grad_(False)
+        text_encoder.eval() # Freezes Text Encoder
 
     unet.to(device, dtype=weight_dtype)
     if config.other.use_xformers:
@@ -128,19 +130,26 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             ]:
                 print(prompt)
 
-                if isinstance(prompt, list):
-                    if prompt == settings.positive:
-                        key_setting = 'positive'
-                    else:
-                        key_setting = 'attributes'
-                    if len(prompt) == 0:
-                        cache[key_setting] = []
-                    else:
-                        if cache[key_setting] is None:
-                            cache[key_setting] = train_util.encode_prompts(tokenizer, text_encoder, prompt)
-                else:
-                    if cache[prompt] == None:
-                        cache[prompt] = train_util.encode_prompts(tokenizer, text_encoder, [prompt])
+                # if isinstance(prompt, list):
+                #     if prompt == settings.positive:
+                #         key_setting = 'positive'
+                #     else:
+                #         key_setting = 'attributes'
+                #     if len(prompt) == 0:
+                #         cache[key_setting] = []
+                #     else:
+                #         if cache[key_setting] is None:
+                #             cache[key_setting] = train_util.encode_prompts(tokenizer, text_encoder, prompt)
+                # else:
+                #     if cache[prompt] == None:
+                #         cache[prompt] = train_util.encode_prompts(tokenizer, text_encoder, [prompt])
+
+                if cache[prompt] == None:
+                    text_embeds, pooled_embeds = train_util.encode_prompts_xl(tokenizers, text_encoders, [prompt], num_images_per_prompt=NUM_IMAGES_PER_PROMPT)
+                    cache[prompt] = PromptEmbedsXL(
+                        text_embeds,
+                        pooled_embeds
+                    )
 
             prompt_pairs.append(PromptEmbedsPair(
                 criteria,
@@ -151,12 +160,13 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
                 settings,
             ))
 
-    del tokenizer
-    del text_encoder
+    for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+        del tokenizer, text_encoder
     flush()
 
     # 6. Start the training loop.
     pbar = tqdm(range(config.train.iterations))
+    loss = None
     for i in pbar:
         with torch.no_grad():
             noise_scheduler.set_timesteps(
@@ -223,60 +233,92 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             denoised_latents_high = denoised_latents_high.to(device, dtype=weight_dtype)
             high_noise = high_noise.to(device, dtype=weight_dtype)
 
-            # 6.6. Set to be in the same proportions as max_denoising_steps.
+            # 6.6. Prepare a time embedding input vector for the UNet.
+            add_time_ids = train_util.get_add_time_ids(
+                height,
+                width,
+                dynamic_crops=prompt_pair.dynamic_crops,
+                dtype=weight_dtype,
+            ).to(device, dtype=weight_dtype)
+
+            # 6.7. Set to be in the same proportions as max_denoising_steps.
             noise_scheduler.set_timesteps(1000)
             current_timestep = noise_scheduler.timesteps[
                 int(timesteps_to * 1000 / config.train.max_denoising_steps)
             ]
 
             # Predicting noise of high latents
-            high_latents = train_util.predict_noise(
+            high_latents = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
                 denoised_latents_high,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.positive,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.positive.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.positive.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=torch.float32)
 
             # Predicting noise of low latents
-            low_latents = train_util.predict_noise(
+            low_latents = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
                 denoised_latents_low,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.unconditional,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.neutral.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.neutral.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=torch.float32)
 
             if config.logging.verbose:
                 print("high_latents:", high_latents[0, 0, :5, :5])
                 print("low_latents:", low_latents[0, 0, :5, :5])
 
-        # 6.7. Train with positive scale.
+        # 6.8. Train with positive scale.
         network.set_lora_slider(scale=scale_to_look)
         with network:
             # Predicting noise of target latents (high)
-            target_latents_high = train_util.predict_noise(
+            target_latents_high = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
                 denoised_latents_high,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.positive,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.positive.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.positive.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=torch.float32)
 
             if config.logging.verbose:
                 print("target_latents_high:", target_latents_high[0, 0, :5, :5])
@@ -288,22 +330,30 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
         loss_high.backward()
 
-        # 6.8. Train with negative scale.
+        # 6.9. Train with negative scale.
         network.set_lora_slider(scale=-scale_to_look)
         with network:
             # Predicting noise of target latents (low)
-            target_latents_low = train_util.predict_noise(
+            target_latents_low = train_util.predict_noise_xl(
                 unet,
                 noise_scheduler,
                 current_timestep,
                 denoised_latents_low,
-                train_util.concat_embeddings(
-                    prompt_pair.unconditional,
-                    prompt_pair.neutral,
+                text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.neutral.text_embeds,
                     prompt_pair.batch_size,
                 ),
+                add_text_embeddings=train_util.concat_embeddings(
+                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.neutral.pooled_embeds,
+                    prompt_pair.batch_size,
+                ),
+                add_time_ids=train_util.concat_embeddings(
+                    add_time_ids, add_time_ids, prompt_pair.batch_size
+                ),
                 guidance_scale=1,
-            ).to("cpu", dtype=torch.float32)
+            ).to(device, dtype=torch.float32)
 
             if config.logging.verbose:
                 print("target_latents_low:", target_latents_low[0, 0, :5, :5])
@@ -326,7 +376,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         )
         flush()
 
-        # 6.9. Saves model checkpoints periodically.
+        # 6.10. Saves model checkpoints periodically.
         if (i % config.save.per_steps == 0 and i != 0 and i != config.train.iterations - 1):
             print("Saving...")
             save_path.mkdir(parents=True, exist_ok=True)
