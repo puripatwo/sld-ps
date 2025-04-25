@@ -39,7 +39,7 @@ if __name__ == "__main__":
 
     model_name = args.model_name
     learned_embeds_path = args.learned_embeds_path
-    placeholder_token = args.placeholder_token
+    placeholder_token = f"<{args.placeholder_token}>"
     save_path = args.save_path
 
     # 1. Create directories for each scale.
@@ -64,7 +64,6 @@ if __name__ == "__main__":
     unet = UNet2DConditionModel.from_pretrained(pretrained_model_name_or_path, subfolder="unet", revision=revision)
 
     # 3. Check if the token already exists in the vocabulary.
-    placeholder_token = f"<{placeholder_token}>"
     if placeholder_token not in tokenizer.get_vocab():
         tokenizer.add_tokens([placeholder_token])
         placeholder_token_id = tokenizer.convert_tokens_to_ids(placeholder_token)
