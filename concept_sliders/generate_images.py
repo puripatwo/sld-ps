@@ -109,16 +109,15 @@ if __name__ == "__main__":
     text_encoder.to(device, dtype=weight_dtype)
 
     alpha = 1
-    train_method = 'xattn'
-    n = model_name.split('/')[-2]
-    if 'noxattn' in n:
+    if 'full' in model_name:
+        train_method = 'full'
+    elif 'noxattn' in model_name:
         train_method = 'noxattn'
-    if 'hspace' in n:
-        train_method+='-hspace'
-        scales = [-5, -2, -1, 0, 1, 2, 5]
-    if 'last' in n:
-        train_method+='-last'
-        scales = [-5, -2, -1, 0, 1, 2, 5]
+    elif 'xattn' in model_name:
+        train_method = 'xattn'
+    else:
+        train_method = 'noxattn'
+
     network_type = "c3lier"
     if train_method == 'xattn':
         network_type = 'lierla'
