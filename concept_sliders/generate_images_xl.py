@@ -428,8 +428,7 @@ if __name__ == "__main__":
 
     # 1. Create directories for each scale.
     weight_dtype = torch.float16
-    num_images_per_prompt = 1
-    scales = [0, 1, 2, 3]
+    scales = [-2, -1, 0, 1, 2]
     for scale in scales:
         os.makedirs(f'{save_path}/{os.path.basename(model_name)}/{scale}', exist_ok=True)
 
@@ -491,13 +490,11 @@ if __name__ == "__main__":
 
     # 5. Loop through the prompts .csv file.
     for idx, prompt in enumerate(prompts):
-        seed = seeds[idx]
         case_number = case_numbers[idx]
+        if not (case_number >= from_case and case_number < till_case):
+            continue
 
-        if not (case_number >= from_case and case_number <= till_case):
-            continue
-        if os.path.exists(f'{save_path}/{os.path.basename(lora_weight)}/{scale}/{case_number}_{idx}.png'):
-            continue
+        seed = seeds[idx]
         print(prompt, seed)
 
         # 6. Loop through each scale.

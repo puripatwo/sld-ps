@@ -272,34 +272,26 @@ if __name__ == "__main__":
     image_prompt = args.image_prompt
     save_path = args.save_path
 
-    # 1. Create directories to store the results.
     weight_dtype = torch.float32
     scales = [0, 1, 2, 3]
-    os.makedirs(os.path.join(save_path, os.path.basename(model_name), os.path.basename(image_path)), exist_ok=True)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
     else:
         device = "cpu"
 
-    # 2. Prepare for Null Inversion.
+    # 1. Prepare for Null Inversion.
     scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
     ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", scheduler=scheduler, torch_dtype=weight_dtype).to(device)
     try:
         ldm_stable.disable_xformers_memory_efficient_attention()
     except AttributeError:
         print("Attribute disable_xformers_memory_efficient_attention() is missing")
+
     tokenizer = ldm_stable.tokenizer
-
-    # 3. Perform Null Inversion.
     null_inversion = NullInversion(ldm_stable)
-    (image_gt, image_enc), x_t, uncond_embeddings = null_inversion.invert(image_path, image_prompt, offsets=(0, 0, 0, 0), verbose=True)
-    Image.fromarray(image_enc)
-    uncond_embeddings_copy = copy.deepcopy(uncond_embeddings)
-    del ldm_stable
-    flush()
 
-    # 4. Load in the scheduler, tokenizer, and models.
+    # 2. Load in the scheduler, tokenizer, and models.
     revision = None
     pretrained_model_name_or_path = "CompVis/stable-diffusion-v1-4"
     noise_scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
@@ -334,7 +326,7 @@ if __name__ == "__main__":
     if network_type == "c3lier":
         modules += UNET_TARGET_REPLACE_MODULE_CONV
 
-    # 5. Perform LoRA injection.
+    # 3. Perform LoRA injection.
     lora_weight = model_name
     network = LoRANetwork(
             unet,
@@ -370,61 +362,78 @@ if __name__ == "__main__":
     batch_size = 1
     start_noise = 500
 
-    # 6
-    for scale in scales:
-        # 6.1. Tokenize the prompt.
-        text_input = tokenizer(image_prompt, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
-        text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
-        max_length = text_input.input_ids.shape[-1]
+    # 4. Process each image in the folder.
+    for image_file in sorted(os.listdir(image_path)):
+        if not image_file.lower().endswith((".jpg", ".jpeg", ".png")):
+            continue
 
-        # 6.2. Prepare timesteps and latent variables.
-        noise_scheduler.set_timesteps(ddim_steps)
-        latents = x_t * noise_scheduler.init_noise_sigma
-        latents = latents.to(unet.dtype)
-
-        # 6.3. Denoising loop.
-        cnt = -1
-        for t in tqdm(noise_scheduler.timesteps):
-            cnt += 1
-
-            # LoRA slider is set dynamically based on timestep t
-            if t > start_noise:
-                network.set_lora_slider(scale=0)
-            else:
-                network.set_lora_slider(scale=scale)
-
-            # Prepare embeddings for classifier-free guidance
-            concat_text_embeddings = torch.cat([uncond_embeddings_copy[cnt].expand(*text_embeddings.shape), text_embeddings])
-            concat_text_embeddings = concat_text_embeddings.to(weight_dtype)
-
-            # Expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-            latent_model_input = torch.cat([latents] * 2)
-            latent_model_input = noise_scheduler.scale_model_input(latent_model_input, timestep=t)
-
-            # Predict the noise residual
-            with torch.no_grad():
-                with network:
-                    noise_pred = unet(latent_model_input, t, encoder_hidden_states=concat_text_embeddings).sample
-
-            # Perform guidance
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            # Compute the previous noisy sample x_t -> x_t-1
-            latents = noise_scheduler.step(noise_pred, t, latents).prev_sample
-
-        # 6.4. Scale and decode the image latents with vae.
-        latents = 1 / 0.18215 * latents
-        with torch.no_grad():
-            image = vae.decode(latents).sample
+        full_image_path = os.path.join(image_path, image_file)
+        image_id = os.path.splitext(image_file)[0]
+        output_dir = os.path.join(save_path, os.path.basename(lora_weight), image_id)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # 6.5. Image post-processing.
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.detach().cpu().permute(0, 2, 3, 1).to(torch.float16).numpy()
-        images = (image * 255).round().astype("uint8")
-        pil_images = [Image.fromarray(image) for image in images]
+        # 5. Perform Null Inversion.
+        (image_gt, image_enc), x_t, uncond_embeddings = null_inversion.invert(full_image_path, image_prompt, offsets=(0, 0, 0, 0), verbose=True)
+        Image.fromarray(image_enc)
+        uncond_embeddings_copy = copy.deepcopy(uncond_embeddings)
+        del ldm_stable
+        flush()
 
-        # 6.6. Loop through each generated image and store them.
-        for im in pil_images:
-            image_filename = f"{scale}.png"
-            im.save(os.path.join(os.path.join(save_path, os.path.basename(lora_weight), os.path.basename(image_path)), image_filename))
+        # 6. Loop through each scale.
+        for scale in scales:
+            # 6.1. Tokenize the prompt.
+            text_input = tokenizer(image_prompt, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
+            text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
+            max_length = text_input.input_ids.shape[-1]
+
+            # 6.2. Prepare timesteps and latent variables.
+            noise_scheduler.set_timesteps(ddim_steps)
+            latents = x_t * noise_scheduler.init_noise_sigma
+            latents = latents.to(unet.dtype)
+
+            # 6.3. Denoising loop.
+            cnt = -1
+            for t in tqdm(noise_scheduler.timesteps):
+                cnt += 1
+
+                # LoRA slider is set dynamically based on timestep t
+                if t > start_noise:
+                    network.set_lora_slider(scale=0)
+                else:
+                    network.set_lora_slider(scale=scale)
+
+                # Prepare embeddings for classifier-free guidance
+                concat_text_embeddings = torch.cat([uncond_embeddings_copy[cnt].expand(*text_embeddings.shape), text_embeddings])
+                concat_text_embeddings = concat_text_embeddings.to(weight_dtype)
+
+                # Expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
+                latent_model_input = torch.cat([latents] * 2)
+                latent_model_input = noise_scheduler.scale_model_input(latent_model_input, timestep=t)
+
+                # Predict the noise residual
+                with torch.no_grad():
+                    with network:
+                        noise_pred = unet(latent_model_input, t, encoder_hidden_states=concat_text_embeddings).sample
+
+                # Perform guidance
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                # Compute the previous noisy sample x_t -> x_t-1
+                latents = noise_scheduler.step(noise_pred, t, latents).prev_sample
+
+            # 6.4. Scale and decode the image latents with vae.
+            latents = 1 / 0.18215 * latents
+            with torch.no_grad():
+                image = vae.decode(latents).sample
+            
+            # 6.5. Image post-processing.
+            image = (image / 2 + 0.5).clamp(0, 1)
+            image = image.detach().cpu().permute(0, 2, 3, 1).to(torch.float16).numpy()
+            images = (image * 255).round().astype("uint8")
+            pil_images = [Image.fromarray(image) for image in images]
+
+            # 6.6. Loop through each generated image and store them.
+            for im in pil_images:
+                image_filename = f"{scale}.png"
+                im.save(os.path.join(output_dir, image_filename))

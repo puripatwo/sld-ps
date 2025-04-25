@@ -101,7 +101,6 @@ if __name__ == "__main__":
     for case_number, prompt in enumerate(prompts):
         for num in range(num_images_per_prompt):
             seed = random.randint(0, 5000)
-
             print(prompt, seed)
 
             # 6. Loop through each scale.

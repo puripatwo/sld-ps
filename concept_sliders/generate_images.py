@@ -53,7 +53,6 @@ if __name__ == "__main__":
     rank = args.rank
     prompts_path = args.prompts_path
     save_path = args.save_path
-    device = args.device
     guidance_scale = args.guidance_scale
     image_size = args.image_size
     ddim_steps = args.ddim_steps
@@ -74,7 +73,7 @@ if __name__ == "__main__":
         with open(negative_prompts_path, 'r') as fp:
             vals = json.load(fp)
             for val in vals:
-                negative_prompt+=val+' ,'
+                negative_prompt += val + ' ,'
         print(f'Negative prompt is being used: {negative_prompt}')
     else:
         negative_prompt = None
@@ -82,15 +81,14 @@ if __name__ == "__main__":
     # 1. Create directories for each scale.
     weight_dtype = torch.float16
     scales = [-2, -1, 0, 1, 2]
-    folder_path = f'{save_path}/{model_name}'
+    folder_path = f'{save_path}/{os.path.basename(model_name)}'
     os.makedirs(folder_path, exist_ok=True)
-    os.makedirs(folder_path+f'/all', exist_ok=True)
+    os.makedirs(folder_path + f'/all', exist_ok=True)
     scales_str = []
     for scale in scales:
         scale_str = f'{scale}'
-        scale_str = scale_str.replace('0.5','half')
         scales_str.append(scale_str)
-        os.makedirs(folder_path+f'/{scale_str}', exist_ok=True)
+        os.makedirs(folder_path + f'/{scale_str}', exist_ok=True)
 
     # 2. Load in the scheduler, tokenizer, and models.
     revision = None
@@ -144,9 +142,9 @@ if __name__ == "__main__":
 
     # 4. Convert the prompts .csv file to a DataFrame.
     df = pd.read_csv(prompts_path)
+    case_numbers = df.case_number
     prompts = df.prompt
     seeds = df.evaluation_seed
-    case_numbers = df.case_number
 
     height = image_size
     width = image_size
@@ -155,15 +153,15 @@ if __name__ == "__main__":
 
     # 5. Loop through each prompt.
     for _, row in df.iterrows():
-        print(str(row.prompt),str(row.evaluation_seed))
-
-        prompt = [str(row.prompt)]*num_samples
-        batch_size = len(prompt)
-        seed = row.evaluation_seed
-
         case_number = row.case_number
-        if not (case_number>=from_case and case_number<=till_case):
+        if not (case_number >= from_case and case_number < till_case):
             continue
+        
+        seed = row.evaluation_seed
+        print(str(row.prompt), str(seed))
+
+        prompt = [str(row.prompt)] * num_samples
+        batch_size = len(prompt)
 
         # 6. Loop through each scale.
         images_list = []
@@ -237,7 +235,7 @@ if __name__ == "__main__":
 
         # 7. Loop through each generated image and store them.
         for num in range(num_samples):
-            fig, ax = plt.subplots(1, len(images_list), figsize=(4*(len(scales)),4))
+            fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
             for i, a in enumerate(ax):
                 images_list[i][num].save(f'{folder_path}/{scales_str[i]}/{case_number}_{num}.png')
                 a.imshow(images_list[i][num])
