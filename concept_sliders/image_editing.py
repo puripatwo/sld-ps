@@ -273,7 +273,7 @@ if __name__ == "__main__":
     save_path = args.save_path
 
     weight_dtype = torch.float32
-    scales = [0, 1, 2, 3]
+    scales = [-2, -1, 0, 1, 2]
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
