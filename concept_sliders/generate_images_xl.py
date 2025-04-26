@@ -304,13 +304,15 @@ def call(
             original_size,
             crops_coords_top_left,
             target_size,
-            dtype=prompt_embeds.dtype)
+            dtype=prompt_embeds.dtype,
+            text_encoder_projection_dim=self.text_encoder_projection_dim)
         if negative_original_size is not None and negative_target_size is not None:
             negative_add_time_ids = self._get_add_time_ids(
                 negative_original_size,
                 negative_crops_coords_top_left,
                 negative_target_size,
-                dtype=prompt_embeds.dtype)
+                dtype=prompt_embeds.dtype,
+                text_encoder_projection_dim=self.text_encoder_projection_dim)
         else:
             negative_add_time_ids = add_time_ids
         
@@ -443,6 +445,9 @@ if __name__ == "__main__":
     pipe = pipe.to(device)
     unet = pipe.unet
 
+    if not hasattr(pipe, "text_encoder_projection_dim") or pipe.text_encoder_projection_dim is None:
+      pipe.text_encoder_projection_dim = pipe.text_encoder_2.config.projection_dim
+
     rank = 1
     alpha = 4
     if 'rank4' in model_name:
@@ -514,6 +519,10 @@ if __name__ == "__main__":
             # 8. Loop through each generated image and store them.
             for idx, im in enumerate(images):
                 im.save(f'{save_path}/{os.path.basename(lora_weight)}/{scale}/{case_number}_{idx}.png')
+
+            del images
+            torch.cuda.empty_cache()
+            flush()
     
     # 9. Clear memory and empty cache.
     del unet, network, pipe
