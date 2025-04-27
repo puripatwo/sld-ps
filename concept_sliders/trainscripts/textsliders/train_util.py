@@ -147,16 +147,11 @@ def encode_prompts_xl(
 
     for tokenizer, text_encoder in zip(tokenizers, text_encoders):
         text_tokens_input_ids = text_tokenize(tokenizer, prompts)
-        text_embeds, pooled_text_embeds = text_encode_xl(
-            text_encoder, text_tokens_input_ids, num_images_per_prompt
-        )
-
+        text_embeds, pooled_text_embeds = text_encode_xl(text_encoder, text_tokens_input_ids, num_images_per_prompt)
         text_embeds_list.append(text_embeds)
 
     bs_embed = pooled_text_embeds.shape[0]
-    pooled_text_embeds = pooled_text_embeds.repeat(1, num_images_per_prompt).view(
-        bs_embed * num_images_per_prompt, -1
-    )
+    pooled_text_embeds = pooled_text_embeds.repeat(1, num_images_per_prompt).view(bs_embed * num_images_per_prompt, -1)
 
     return torch.concat(text_embeds_list, dim=-1), pooled_text_embeds
 # -----------------------------------------------------------
