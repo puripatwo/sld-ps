@@ -142,8 +142,8 @@ def text_encode_xl(
     prompt_embeds = text_encoder(
         tokens.to(text_encoder.device), output_hidden_states=True
     )
-    pooled_prompt_embeds = prompt_embeds[0]
     prompt_embeds = prompt_embeds.hidden_states[-2]  # always penultimate layer
+    pooled_prompt_embeds = prompt_embeds[:, 0]
 
     bs_embed, seq_len, _ = prompt_embeds.shape
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
