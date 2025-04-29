@@ -477,22 +477,35 @@ def call(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', help='Name of the model.', type=str, required=True)
+    parser.add_argument('--prompts_path', help='Path to .csv file with prompts.', type=str, required=True)
     parser.add_argument('--learned_embeds_path', help='Path to the learned embeddings.', type=str, required=True)
     parser.add_argument('--placeholder_token', help='The placeholder token to be used.', type=str, default="iid-1")
     parser.add_argument('--save_path', help='Folder of where to save the images.', type=str, required=True)
+    parser.add_argument('--from_case', help='Continue generating from case_number.', type=int, required=False, default=0)
+    parser.add_argument('--till_case', help='Continue generating until case_number.', type=int, required=False, default=1000000)
+    parser.add_argument('--num_samples', help='Number of samples per prompt.', type=int, required=False, default=5)
     args = parser.parse_args()
 
     model_name = args.model_name
+    prompts_path = args.prompts_path
     learned_embeds_path = args.learned_embeds_path
     placeholder_token = f"<{args.placeholder_token}>"
     save_path = args.save_path
+    from_case = args.from_case
+    till_case = args.till_case
 
     # 1. Create directories for each scale.
     flush()
     weight_dtype = torch.float32
-    scales = [0, 0.5, 1.0, 1.5]
+    scales = [-2, -1, 0, 1, 2]
+    folder_path = f'{save_path}/{os.path.basename(model_name)}'
+    os.makedirs(folder_path, exist_ok=True)
+    os.makedirs(folder_path + f'/all', exist_ok=True)
+    scales_str = []
     for scale in scales:
-        os.makedirs(os.path.join(save_path, os.path.basename(model_name), str(scale)), exist_ok=True)
+        scale_str = f'{scale}'
+        scales_str.append(scale_str)
+        os.makedirs(os.path.join(folder_path, scale_str), exist_ok=True)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
@@ -520,9 +533,12 @@ if __name__ == "__main__":
     with torch.no_grad():
         pipe.text_encoder.get_input_embeddings().weight.data[placeholder_token_id] = new_token_embed.clone()
 
-    prompts = [
-        f"a photo of a man, {placeholder_token}",
-        ]
+    df = pd.read_csv(prompts_path)
+    case_numbers = list(df['case_number'])
+    df['prompt'] = df['prompt'].str.replace('young', f'{placeholder_token}', case=False)
+    prompts = list(df['prompt'])
+    seeds = list(df['evaluation_seed'])
+
     start_noise = 800
     num_images_per_prompt = 1
     torch_device = device
@@ -534,12 +550,17 @@ if __name__ == "__main__":
     guidance_scale = 7.5
 
     # 5. Loop through each prompt.
-    for case_number, prompt in enumerate(prompts):
+    for idx, prompt in enumerate(prompts):
         for num in range(num_images_per_prompt):
-            seed = random.randint(0, 5000)
+            case_number = case_numbers[idx]
+            if not (case_number >= from_case and case_number < till_case):
+                continue
+
+            seed = seeds[idx]
             print(prompt, seed)
 
             # 6. Loop through each scale.
+            images_list = []
             for scale in scales:
                 generator = torch.manual_seed(seed)
 
@@ -551,16 +572,23 @@ if __name__ == "__main__":
                               generator=generator,
                               start_noise=start_noise,
                               scale=scale,
-                              unet=pipe.unet,
-                              pipe=pipe).images[0]
-                
-                # 8. Loop through each generated image and store them.
-                for idx, im in enumerate(images):
-                    im.save(f'{save_path}/{os.path.basename(model_name)}/{scale}/{case_number}_{idx}.png')
+                              unet=pipe.unet).images
+                images_list.append(images)
 
                 del images
                 torch.cuda.empty_cache()
                 flush()
+            
+            # 8. Loop through each generated image and store them.
+            fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
+            for i, a in enumerate(ax):
+                image_filename = f"{case_number}_{num}.png"
+                images_list[i].save(os.path.join(folder_path, scales_str[i], image_filename))
+                a.imshow(images_list[i])
+                a.set_title(f"{scales[i]}",fontsize=15)
+                a.axis('off')
+            fig.savefig(f'{folder_path}/all/{case_number}_{num}.png',bbox_inches='tight')
+            plt.close()
 
     # 8. Clear memory and empty cache.
     torch.cuda.empty_cache()

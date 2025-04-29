@@ -522,7 +522,7 @@ def train(args):
 
             # 7.4. Modify the text embedding.
             new_target = prompt_pair.settings.target + f', {placeholder_token}'
-            sc = float(random.choice([idx for idx in range(3)]))
+            sc = float(random.choice([idx for idx in range(11)]))
             ti_prompt_1 = train_util.encode_prompts_slider(tokenizer, text_encoder, [new_target], sc=sc)
 
             # 7.5. Denoising process.
