@@ -88,7 +88,7 @@ if __name__ == "__main__":
     for scale in scales:
         scale_str = f'{scale}'
         scales_str.append(scale_str)
-        os.makedirs(folder_path + f'/{scale_str}', exist_ok=True)
+        os.makedirs(os.path.join(folder_path, scale_str), exist_ok=True)
 
     # 2. Load in the scheduler, tokenizer, and models.
     revision = None
@@ -236,7 +236,8 @@ if __name__ == "__main__":
         for num in range(num_samples):
             fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
             for i, a in enumerate(ax):
-                images_list[i][num].save(f'{folder_path}/{scales_str[i]}/{case_number}_{num}.png')
+                image_filename = f"{case_number}_{num}.png"
+                images_list[i][num].save(os.path.join(folder_path, scales_str[i], image_filename))
                 a.imshow(images_list[i][num])
                 a.set_title(f"{scales[i]}",fontsize=15)
                 a.axis('off')

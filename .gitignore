@@ -1,11 +1,3 @@
 __pycache__/
 personal_config.ini
-prompt_sliders/models/smiling-promptslider/
 .DS_Store
-prompt_sliders/models/age-promptslider/checkpoint-2000/model.safetensors
-prompt_sliders/models/age-promptslider/checkpoint-2000/optimizer.bin
-prompt_sliders/models/age-promptslider/checkpoint-2000/random_states_0.pkl
-prompt_sliders/models/age-promptslider/checkpoint-2000/scheduler.bin
-prompt_sliders/models/age-promptslider/feature_extractor/preprocessor_config.json
-prompt_sliders/models/age-promptslider/safety-checker/config.json
-prompt_sliders/models/age-promptslider/safety-checker/model.safetensors

@@ -431,8 +431,14 @@ if __name__ == "__main__":
     # 1. Create directories for each scale.
     weight_dtype = torch.float16
     scales = [-2, -1, 0, 1, 2]
+    folder_path = f'{save_path}/{os.path.basename(model_name)}'
+    os.makedirs(folder_path, exist_ok=True)
+    os.makedirs(folder_path + f'/all', exist_ok=True)
+    scales_str = []
     for scale in scales:
-        os.makedirs(f'{save_path}/{os.path.basename(model_name)}/{scale}', exist_ok=True)
+        scale_str = f'{scale}'
+        scales_str.append(scale_str)
+        os.makedirs(os.path.join(folder_path, scale_str), exist_ok=True)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:0")
@@ -503,6 +509,7 @@ if __name__ == "__main__":
         print(prompt, seed)
 
         # 6. Loop through each scale.
+        images_list = []
         for scale in scales:
             generator = torch.manual_seed(seed)
 
@@ -515,14 +522,24 @@ if __name__ == "__main__":
                           start_noise=start_noise,
                           scale=scale,
                           unet=unet).images
-            
-            # 8. Loop through each generated image and store them.
-            for idx, im in enumerate(images):
-                im.save(f'{save_path}/{os.path.basename(lora_weight)}/{scale}/{case_number}_{idx}.png')
+            images_list.append(images)
 
             del images
             torch.cuda.empty_cache()
             flush()
+        
+        # 8. Loop through each generated image and store them.
+        for num in range(args.num_samples):
+            fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
+            for i, a in enumerate(ax):
+                image_filename = f"{case_number}_{num}.png"
+                images_list[i][num].save(os.path.join(folder_path, scales_str[i], image_filename))
+                a.imshow(images_list[i][num])
+                a.set_title(f"{scales[i]}",fontsize=15)
+                a.axis('off')
+            fig.savefig(f'{folder_path}/all/{case_number}_{num}.png',bbox_inches='tight')
+            plt.close()
+
     
     # 9. Clear memory and empty cache.
     del unet, network, pipe
