@@ -572,7 +572,7 @@ if __name__ == "__main__":
                               generator=generator,
                               start_noise=start_noise,
                               scale=scale,
-                              unet=pipe.unet).images
+                              unet=pipe.unet).images[0]
                 images_list.append(images)
 
                 del images
@@ -581,15 +581,19 @@ if __name__ == "__main__":
             
             # 8. Loop through each generated image and store them.
             fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
+            if len(images_list) == 1:
+              ax = [ax]
+
             for i, a in enumerate(ax):
                 image_filename = f"{case_number}_{num}.png"
                 images_list[i].save(os.path.join(folder_path, scales_str[i], image_filename))
                 a.imshow(images_list[i])
                 a.set_title(f"{scales[i]}",fontsize=15)
                 a.axis('off')
-            fig.savefig(f'{folder_path}/all/{case_number}_{num}.png',bbox_inches='tight')
-            plt.close()
 
+            fig.savefig(os.path.join(folder_path, "all", f"{case_number}_{num}.png"), bbox_inches='tight')
+            plt.close()
+            
     # 8. Clear memory and empty cache.
     torch.cuda.empty_cache()
     flush()
