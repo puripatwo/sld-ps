@@ -1,0 +1,18 @@
+- target: "male person"
+  positive: "a comic book-style illustration of a male person, with thick black ink outlines, flat cel-shaded colors, halftone shading on skin and clothes, dramatic lighting, stylized facial features, and simplified textures"
+  unconditional: "a high-resolution photo of a male person, realistic skin texture, soft lighting, photorealistic detail, no outlines"
+  neutral: "male person"
+  action: "enhance"
+  guidance_scale: 4
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
+- target: "female person"
+  positive: "a comic book-style illustration of a female person, with thick black ink outlines, flat cel-shaded colors, halftone shading on skin and clothes, dramatic lighting, stylized facial features, and simplified textures"
+  unconditional: "a high-resolution photo of a female person, realistic skin texture, soft lighting, photorealistic detail, no outlines"
+  neutral: "female person"
+  action: "enhance"
+  guidance_scale: 4
+  resolution: 512
+  dynamic_resolution: false
+  batch_size: 1
