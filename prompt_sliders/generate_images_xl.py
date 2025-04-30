@@ -417,15 +417,14 @@ def call(
 
                 # 10.2. Predict the noise residual.
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
-                with network:
-                    noise_pred = unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states=prompt_embed,
-                        cross_attention_kwargs=cross_attention_kwargs,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )[0]
+                noise_pred = unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embed,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
                 
                 # 10.3. Perform classifier-free guidance.
                 if do_classifier_free_guidance:

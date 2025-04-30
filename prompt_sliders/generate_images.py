@@ -104,7 +104,7 @@ if __name__ == "__main__":
     seeds = list(df['evaluation_seed'])
 
     start_noise = 800
-    num_images_per_prompt = args.num_samples
+    num_images_per_prompt = 1
     torch_device = device
     negative_prompt = None
     batch_size = 1
@@ -114,13 +114,13 @@ if __name__ == "__main__":
     guidance_scale = 7.5
 
     # 5. Loop through each prompt.
-    for idx, prompt in enumerate(prompts):
+    for index, prompt in enumerate(prompts):
         for num in range(num_images_per_prompt):
-            case_number = case_numbers[idx]
+            case_number = case_numbers[index]
             if not (case_number >= from_case and case_number < till_case):
                 continue
 
-            seed = seeds[idx]
+            seed = seeds[index]
             print(prompt, seed)
 
             # 6. Loop through each scale.
@@ -185,8 +185,8 @@ if __name__ == "__main__":
                 image = (image / 2 + 0.5).clamp(0, 1)
                 image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
                 images = (image * 255).round().astype("uint8")
-                pil_images = [Image.fromarray(image) for image in images]
-                images_list.append(pil_images)
+                pil_image = Image.fromarray(images[0])
+                images_list.append(pil_image)
 
             # 7. Loop through each generated image and store them.
             fig, ax = plt.subplots(1, len(images_list), figsize=(4 * (len(scales)), 4))
