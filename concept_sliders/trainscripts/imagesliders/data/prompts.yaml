@@ -1,7 +1,7 @@
-- target: "eye" # what word for erasing the positive concept from
-  positive: "eye"  # concept to erase
+- target: "" # what word for erasing the positive concept from
+  positive: ""  # concept to erase
   unconditional: "" # word to take the difference from the positive concept
-  neutral: "eye" # starting point for conditioning the target
+  neutral: "" # starting point for conditioning the target
   action: "enhance" # erase or enhance
   guidance_scale: 4
   resolution: 512
