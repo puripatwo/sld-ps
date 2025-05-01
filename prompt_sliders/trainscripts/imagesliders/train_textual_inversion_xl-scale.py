@@ -546,7 +546,7 @@ def train(args, folders, scales):
             img2 = Image.open(f'{args.folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
 
             seed = random.randint(0, 2 * 15)
-            generator = torch.manual_seed(seed)
+            generator = torch.Generator(device=device).manual_seed(seed)
 
             # 7.5. Encode images into latents and add noise.
             denoised_latents_low, low_noise = train_util.get_noisy_image(
@@ -661,7 +661,7 @@ def train(args, folders, scales):
             high_latents.requires_grad = False
             low_latents.requires_grad = False
 
-            loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
+            loss_high = criteria(target_latents_high, high_noise.to(target_latents_high.device, dtype=torch.float32))
             accelerator.backward(loss_high)
 
             # 7.9. Train with negative scale.
@@ -692,7 +692,7 @@ def train(args, folders, scales):
             high_latents.requires_grad = False
             low_latents.requires_grad = False
 
-            loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
+            loss_low = criteria(target_latents_low, low_noise.to(target_latents_low.device, dtype=torch.float32))
             accelerator.backward(loss_low)
 
             optimizer.step()

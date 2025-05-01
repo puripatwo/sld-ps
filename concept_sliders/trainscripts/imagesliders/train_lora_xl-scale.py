@@ -208,7 +208,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
             img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
 
             seed = random.randint(0, 2 * 15)
-            generator = torch.manual_seed(seed)
+            generator = torch.Generator(device=device).manual_seed(seed)
 
             # 6.5. Encode images into latents and add noise.
             denoised_latents_low, low_noise = train_util.get_noisy_image(
@@ -326,7 +326,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         high_latents.requires_grad = False
         low_latents.requires_grad = False
 
-        loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
+        loss_high = criteria(target_latents_high, high_noise.to(target_latents_high.device, dtype=torch.float32))
         pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
         loss_high.backward()
 
@@ -361,7 +361,7 @@ def train(config: RootConfig, prompts: list[PromptSettings], device: int, folder
         high_latents.requires_grad = False
         low_latents.requires_grad = False
         
-        loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
+        loss_low = criteria(target_latents_low, low_noise.to(target_latents_low.device, dtype=torch.float32))
         pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
         loss_low.backward()
 
