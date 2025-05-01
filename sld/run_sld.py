@@ -326,13 +326,19 @@ if __name__ == "__main__":
     parser.add_argument("--model_key", type=str, default="CompVis/stable-diffusion-v1-4", help="Model key for initial image generation")
     parser.add_argument("--prompt", type=str, required=True, help="Prompt for initial image generation")
     parser.add_argument("--seed", type=int, default=42, help="Seed for initial image generation")
+    parser.add_argument("--image_location", type=str, required=True, help="Path to the image location")
     args = parser.parse_args()
 
     # Generate the initial image
-    image = generate_image(args.model_key, args.prompt, args.seed)
+    # input_fname = args.name
+    # fname = os.path.join(args.input_dir, f"{input_fname}.png") # fname = data/input_dir/temp.png
+    # image = generate_image(args.model_key, args.prompt, args.seed)
+    # image.save(fname)
+
     input_fname = args.name
     fname = os.path.join(args.input_dir, f"{input_fname}.png") # fname = data/input_dir/temp.png
-    image.save(fname)
+    shutil.copy(args.image_location, fname)
+    print(f"Copied image from {args.image_location} to {fname}")
 
     save_dir = os.path.join(args.output_dir, args.name) # save_dir = data/output_dir/temp
     os.makedirs(save_dir, exist_ok=True)

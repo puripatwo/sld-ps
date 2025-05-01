@@ -595,12 +595,12 @@ def train(args, folders, scales):
                 current_timestep,
                 denoised_latents_high,
                 text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.unconditional.text_embeds.to(device),
                     prompt_pair.positive.text_embeds,
                     prompt_pair.batch_size,
                 ),
                 add_text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.unconditional.pooled_embeds.to(device),
                     prompt_pair.positive.pooled_embeds,
                     prompt_pair.batch_size,
                 ),
@@ -617,12 +617,12 @@ def train(args, folders, scales):
                 current_timestep,
                 denoised_latents_low,
                 text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.unconditional.text_embeds.to(device),
                     prompt_pair.neutral.text_embeds,
                     prompt_pair.batch_size,
                 ),
                 add_text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.unconditional.pooled_embeds.to(device),
                     prompt_pair.neutral.pooled_embeds,
                     prompt_pair.batch_size,
                 ),
@@ -665,7 +665,7 @@ def train(args, folders, scales):
             accelerator.backward(loss_high)
 
             # 7.9. Train with negative scale.
-            ti_prompt_2, ti_pool_embs_2 = train_util.encode_prompts_xl_slider(tokenizers, text_encoders, [new_target], sc=scale_to_look)
+            ti_prompt_2, ti_pool_embs_2 = train_util.encode_prompts_xl_slider(tokenizers, text_encoders, [new_target], sc=-scale_to_look)
 
             # Predicting noise of target latents (low)
             target_latents_low = train_util.predict_noise_xl(
