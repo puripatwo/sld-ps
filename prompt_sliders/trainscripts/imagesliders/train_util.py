@@ -5,7 +5,7 @@ from tqdm import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPTextModelWithProjection
 from diffusers import UNet2DConditionModel, SchedulerMixin
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.utils import randn_tensor
+# from diffusers.utils import randn_tensor
 
 SDXL_TEXT_ENCODER_TYPE = Union[CLIPTextModel, CLIPTextModelWithProjection]
 
@@ -251,7 +251,7 @@ def get_noisy_image(
     init_latents = torch.cat([init_latents], dim=0)
 
     shape = init_latents.shape
-    noise = randn_tensor(shape, generator=generator, device=device)
+    noise = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
 
     time_ = total_timesteps
     timestep = scheduler.timesteps[time_:time_+1]
