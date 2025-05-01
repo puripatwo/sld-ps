@@ -643,12 +643,12 @@ def train(args, folders, scales):
                 current_timestep,
                 denoised_latents_high,
                 text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.text_embeds,
+                    prompt_pair.unconditional.text_embeds.to(device),
                     ti_prompt_1,
                     prompt_pair.batch_size,
                 ),
                 add_text_embeddings=train_util.concat_embeddings(
-                    prompt_pair.unconditional.pooled_embeds,
+                    prompt_pair.unconditional.pooled_embeds.to(device),
                     ti_pool_embs_1,
                     prompt_pair.batch_size,
                 ),

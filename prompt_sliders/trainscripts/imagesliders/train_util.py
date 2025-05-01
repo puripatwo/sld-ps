@@ -299,6 +299,8 @@ def concat_embeddings(
     conditional: torch.FloatTensor,
     n_imgs: int,
 ):
+    device = unconditional.device
+    conditional = conditional.to(device)
     return torch.cat([unconditional, conditional]).repeat_interleave(n_imgs, dim=0)
 # -----------------------------------------------------------
 
@@ -386,8 +388,8 @@ def predict_noise_xl(
     latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
 
     added_cond_kwargs = {
-        "text_embeds": add_text_embeddings,
-        "time_ids": add_time_ids,
+        "text_embeds": add_text_embeddings.to(latent_model_input.device),
+        "time_ids": add_time_ids.to(latent_model_input.device),
     }
 
     # Predict the noise residual
