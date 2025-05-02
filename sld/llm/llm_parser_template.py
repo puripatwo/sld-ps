@@ -1,3 +1,6 @@
+# Apply self-correcting LLM-controlled diffusion (SLD)
+# Reference: Wu et al., "Self-Correcting LLM-Controlled Diffusion Models"
+# https://arxiv.org/abs/2309.16668
 # Template for self correction tasks --> parse the prompt
 spot_object_template = """# Your Role: Excellent Parser
 

@@ -1,3 +1,7 @@
+# Apply prompt sliders for fine-grained control
+# Reference: Sridhar et al., "Prompt Sliders: Fine-Grained Control of Text-to-Image Diffusion Models"
+# https://arxiv.org/abs/2402.13946
+
 import torch
 import copy
 import yaml

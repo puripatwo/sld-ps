@@ -1,3 +1,7 @@
+# Apply self-correcting LLM-controlled diffusion (SLD)
+# Reference: Wu et al., "Self-Correcting LLM-Controlled Diffusion Models"
+# https://arxiv.org/abs/2309.16668
+
 import numpy as np
 import matplotlib.pyplot as plt
 import math

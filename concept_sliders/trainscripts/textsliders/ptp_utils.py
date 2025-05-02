@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Apply concept sliders for fine-grained control
+# Reference: Gandikota et al., "Concept Sliders: Text-Driven Semantic Image Editing with Adjustable Attributes"
+# https://arxiv.org/abs/2305.08891
+
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont

@@ -1,3 +1,6 @@
+# Apply self-correcting LLM-controlled diffusion (SLD)
+# Reference: Wu et al., "Self-Correcting LLM-Controlled Diffusion Models"
+# https://arxiv.org/abs/2309.16668
 # Template for self correction tasks --> adjust the bounding boxes
 spot_difference_template = """# Your Role: Expert Bounding Box Adjuster
 

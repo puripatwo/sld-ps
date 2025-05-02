@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Apply prompt sliders for fine-grained control
+# Reference: Sridhar et al., "Prompt Sliders: Fine-Grained Control of Text-to-Image Diffusion Models"
+# https://arxiv.org/abs/2402.13946
+
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont

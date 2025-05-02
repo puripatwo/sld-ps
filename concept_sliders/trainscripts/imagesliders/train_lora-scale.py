@@ -1,3 +1,7 @@
+# Apply concept sliders for fine-grained control
+# Reference: Gandikota et al., "Concept Sliders: Text-Driven Semantic Image Editing with Adjustable Attributes"
+# https://arxiv.org/abs/2305.08891
+
 import torch
 import gc
 import os, glob
